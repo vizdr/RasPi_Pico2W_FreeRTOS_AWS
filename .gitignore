@@ -1,0 +1,7 @@
+build
+!.vscode/*
+
+# secrets: never commit these
+certs/
+wifi_credentials.h
+aws_credentials.c
