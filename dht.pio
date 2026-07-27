@@ -1,0 +1,75 @@
+;
+; dht.pio -- DHT11 / DHT22 (AM2302) single-wire reader for RP2040 / RP2350 PIO
+;
+; The Makeblock "Me Temperature and Humidity Sensor" (MeHumitureSensor) is a
+; DHT11 on slot S2 of the RJ25 connector, so this program drives it directly.
+;
+; The state machine is clocked at exactly 1 instruction per microsecond
+; (clkdiv = clk_sys / 1 MHz), so every [n] delay below is n microseconds.
+;
+; Line must have a pull-up (4k7 .. 10k) to the sensor's own VDD rail.
+; RX FIFO must be joined (8 deep) because one frame pushes 5 words.
+;
+; Frame timing produced by the sensor:
+;   start   : MCU holds low >= 18 ms, then releases
+;   ack     : sensor low ~80 us, high ~80 us
+;   bit     : low 50 us, then high 26..28 us ('0') or 70 us ('1')
+;   40 bits : RH-int, RH-dec, T-int, T-dec, checksum   (MSB first)
+;
+
+.program dht
+
+public entry:
+    set pindirs, 1                  ; take control of the line
+    set pins, 0                     ; --- MCU start pulse: hold low ---
+    set x, 19
+start_lo_outer:
+    set y, 29
+start_lo_inner:
+    jmp y-- start_lo_inner  [30]    ; 31 us per iteration
+    jmp x-- start_lo_outer          ; 20 * 30 * 31 us ~= 18.6 ms  (spec: >= 18 ms)
+    set pindirs, 0                  ; release; the pull-up takes the line high
+
+    wait 0 pin 0                    ; sensor ACK: pulls low  (~80 us)
+    wait 1 pin 0                    ; sensor ACK: releases   (~80 us)
+    wait 0 pin 0                    ; falling edge = start of bit 0's 50 us low
+
+    set x, 4                        ; 5 bytes
+byte_loop:
+    set y, 7                        ; 8 bits per byte, MSB first
+bit_loop:
+    wait 1 pin 0                    ; rising edge -> data pulse begins
+    nop                     [31]
+    nop                     [9]     ; sample ~43 us after the edge:
+    in pins, 1                      ;   still high => '1', already low => '0'
+    wait 0 pin 0                    ; resync on the falling edge
+    jmp y-- bit_loop
+    jmp x-- byte_loop
+
+done:
+    jmp done                        ; park. The CPU restarts the SM per sample,
+                                    ; so a dead sensor stalls here harmlessly
+                                    ; instead of corrupting the next frame.
+
+% c-sdk {
+#include "hardware/clocks.h"
+
+// Configure and load (but do not enable) a state machine for one DHT sensor.
+static inline void dht_program_init(PIO pio, uint sm, uint offset, uint pin) {
+    pio_gpio_init(pio, pin);
+    gpio_pull_up(pin);                       // weak (~56k) backup for the external pull-up
+
+    pio_sm_config c = dht_program_get_default_config(offset);
+    sm_config_set_set_pins(&c, pin, 1);      // "set pins" / "set pindirs" target
+    sm_config_set_in_pins(&c, pin);          // "wait ... pin 0" and "in pins, 1" target
+    sm_config_set_in_shift(&c,
+                           false,            // shift left  -> MSB first
+                           true,             // autopush
+                           8);               // ... one byte at a time
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);   // 8-deep RX; a frame needs 5
+    sm_config_set_clkdiv(&c, (float)clock_get_hz(clk_sys) / 1000000.0f); // 1 cycle = 1 us
+
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, false);  // idle as input
+    pio_sm_init(pio, sm, offset, &c);        // leaves the SM disabled
+}
+%}

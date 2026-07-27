@@ -52,7 +52,13 @@ add_executable(blink_freertos
     temp_task.c
     time_task.c
     wifi_task.c
+    dht.c
+    humiture_task.c
     )
+
+# Generate PIO header for dht.pio (must come after add_executable: it calls
+# add_dependencies()/get_target_property() on the target, which must already exist)
+pico_generate_pio_header(blink_freertos ${CMAKE_CURRENT_LIST_DIR}/dht.pio)
 
 target_include_directories(blink_freertos PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
@@ -68,6 +74,8 @@ target_link_libraries(blink_freertos
     pico_lwip_mbedtls
     pico_mbedtls
     pico_lwip_sntp
+    hardware_pio
+    hardware_clocks
     )
 
 if (PICO_CYW43_SUPPORTED)

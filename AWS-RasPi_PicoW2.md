@@ -209,7 +209,7 @@ several rounds:
 2. Enabled `MBEDTLS_DEBUG_C` + `ALTCP_MBEDTLS_LIB_DEBUG` for verbose tracing — produced zero
    extra output, because the actual failing checks are silent (`return
    MBEDTLS_ERR_SSL_BAD_INPUT_DATA;` with no accompanying `MBEDTLS_SSL_DEBUG_MSG` call nearby).
-3. **Debugger, precisely targeted** (see §6 for the technique): a conditional breakpoint with
+3. **Debugger, precisely targeted** (see §7 for the technique): a conditional breakpoint with
    auto-continue (`break ssl_tls.c:4676 if ret != 0` / `commands` / `finish` / `continue`)
    caught the exact failing state without manually stepping through dozens of benign
    `MBEDTLS_ERR_SSL_WANT_READ` returns (expected — TLS messages arrive fragmented across
@@ -279,7 +279,150 @@ MQTT test client.
 
 ---
 
-## 6. Debug commands manual
+## 6. Downstream telemetry: IoT Rule → SQS
+
+To consume telemetry outside of the MQTT test client, added an IoT Rule that forwards every
+published message to an SQS queue (`RaspiPiPico2w-telemetry-queue`), verified end-to-end via the
+AWS CLI. (This also picked up the DHT11 humidity sensor integration from
+`README-DHT11.md`/`humiture_task.c` along the way — the payload below reflects that.)
+
+### 6.1 AWS CLI wasn't installed
+
+`aws` wasn't present on the dev machine, and `sudo apt install awscli` failed with "no
+installation candidate." Ubuntu 24.04's archive genuinely has no `awscli` package at all —
+confirmed by grepping the raw `universe` component `Packages` lists directly, not just trusting
+`apt-cache policy`. The `command-not-found` hint suggesting `apt install awscli` comes from a
+separate, stale suggestion database that doesn't match the real archive contents. Installed via
+AWS's own official installer instead:
+
+```bash
+curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+unzip -q awscliv2.zip
+sudo ./aws/install
+```
+
+Then `aws configure`, using an **IAM user's** access key (Console → IAM → Users → Security
+credentials → Create access key — never the root account, and unrelated to the device's
+mutual-TLS certificate, which authenticates MQTT, not the CLI/API), region `eu-central-1`
+(matches the IoT endpoint's embedded region), and `aws sts get-caller-identity` to confirm the
+credentials actually work.
+
+### 6.2 The rule
+
+IoT Core Console → Message Routing → Rules → new rule, SQL statement:
+
+```sql
+SELECT * FROM 'pico2w-VZ-210726-freertos/telemetry'
+```
+
+`FROM` takes the MQTT topic filter as a quoted string (this is IoT SQL, not a database query) —
+not a table name. `SELECT *` forwards the whole JSON payload unmodified. Action: **Send a message
+to an Amazon SQS queue**, targeting `RaspiPiPico2w-telemetry-queue`, using the IAM role the
+console offers to auto-create (needs `sqs:SendMessage` on that queue — the console-generated role
+covers this by default).
+
+### 6.3 The `useBase64` gotcha
+
+First test messages pulled from the queue were base64 blobs, not plain JSON:
+
+```
+eyJ0ZW1wZXJhdHVyZV9jIjozNi45NywiYW1iaWVudF90ZW1wX2MiOjI2LjQsImh1bWlkaXR5X3BjdCI6NDMuMH0=
+```
+
+which decodes to
+
+```json
+{"temperature_c":36.97,"ambient_temp_c":26.4,"humidity_pct":43.0}
+```
+
+Not a CLI display artifact — the rule's SQS action has a `useBase64` field, which was on, and
+base64-encodes the entire payload before writing it to the queue. **Fix**: unchecked "Use Base64
+encoding" on the action. After the fix, a stale message already sitting in the queue (never
+explicitly deleted, so it kept reappearing once its visibility timeout expired — see below) briefly
+looked like the fix hadn't taken effect; `aws sqs purge-queue` plus a fresh publish confirmed it had.
+
+### 6.4 Testing the pipeline
+
+```bash
+aws sqs list-queues
+aws sqs receive-message --queue-url <url> --wait-time-seconds 20
+```
+
+`receive-message` doesn't delete anything — it hides the message for the queue's visibility
+timeout, then it reappears if not explicitly acknowledged:
+
+```bash
+aws sqs delete-message --queue-url <url> --receipt-handle <handle-from-the-response>
+```
+
+**Retrieving several messages at once**: `--max-number-of-messages` accepts up to 10 per call —
+that's a hard per-call cap, and even under it SQS may only return a subset of what's actually
+queued (messages are spread across multiple backend servers, so one call — even long-polling —
+isn't guaranteed to drain everything). Loop the call until it comes back empty to be sure:
+
+```bash
+aws sqs receive-message --queue-url <url> --wait-time-seconds 20 --max-number-of-messages 10
+```
+
+**One message per line**: the CLI's own `--output text` can join multiple array elements onto
+the same tab-separated line rather than one per line, which is confusing for this. `jq` gives
+reliable one-per-line output regardless of how many messages came back:
+
+```bash
+aws sqs receive-message --queue-url <url> --wait-time-seconds 20 --max-number-of-messages 10 \
+  --output json | jq -r '.Messages[].Body'
+```
+
+(with `useBase64` off, `Body` is already plain JSON — no `base64 -d` needed; `jq` not installed
+→ `sudo apt install jq`.)
+
+Confirmed end-to-end: Pico → MQTT publish → AWS IoT Core → Rule → SQS, with genuine sensor data
+(temperature and humidity both physically plausible) landing in the queue as plain JSON.
+
+### 6.5 A quick `jq` primer
+
+`jq` is a command-line JSON processor — `sed`/`awk`, but for JSON instead of plain text lines. It
+reads JSON on stdin, applies a filter (its own small query language), and writes JSON (or raw
+text) back out. Everything is a filter that transforms an input value into an output value (or a
+*stream* of them), and filters compose with `|` exactly like shell pipes compose commands.
+
+Pieces used in `.Messages[].Body` above:
+
+- **`.foo`** — field access: pulls the value at key `"foo"` from an object (`.Messages` pulls the
+  `"Messages"` array out of the `receive-message` response envelope).
+- **`.foo[]`** — the *iterate* operator: explodes an array into a stream of its individual
+  elements, rather than one array value. This is what turns "one array of N messages" into "N
+  separate stream items" — and is the actual reason the output ends up one-per-line: jq prints
+  each stream item on its own line automatically, the query itself doesn't request line
+  formatting.
+- **`.foo.bar`** — chains field access; applied per-element after `[]`, `.Body` pulls each
+  streamed message's `Body` field. `.Messages[].Body` is shorthand for `.Messages[] | .Body`.
+
+Other filters worth knowing:
+
+- **`.`** — identity: the whole input, unchanged (`jq '.'` alone just pretty-prints).
+- **`.foo[0]`** — array indexing by position.
+- **`[...]`** — collects a stream back into a single JSON array, e.g. `[.Messages[].Body]`
+  instead of separate lines.
+- **`select(condition)`** — keeps only stream elements where `condition` is true, e.g.
+  `.Messages[] | select(.Body | contains("humidity"))`.
+
+Flags:
+
+- **`-r`** (raw output) — string results print unquoted/unescaped instead of as JSON string
+  literals. Without it, a `Body` value (itself a JSON string) prints double-encoded:
+  `"{\"temperature_c\":36.97,...}"`. With it: clean `{"temperature_c":36.97,...}`.
+- **`-c`** (compact output) — one JSON object per line instead of pretty-printed multi-line.
+- **`-e`** — sets jq's exit code from the last output's truthiness, useful in shell `if` checks.
+
+Why it's used here rather than the CLI's own `--query` (JMESPath): `jq` is the standard, more
+capable tool for slicing `--output json` responses once JMESPath's more limited syntax stops
+being enough — in this project's case, reliably pulling just the `Body` out of each SQS message
+in the response envelope, one per line.
+
+---
+
+## 7. Debug commands manual
 
 The technique that cracked every hard bug in this project (the FreeRTOS scheduler bug in the
 base setup, and the `-28928` chain here): **reproduce with real hardware feedback, not more
@@ -320,7 +463,7 @@ x/8xw <address>          # dump 8 words in hex starting at an address
 **"Value optimized out"**: happens even in nominally "Debug" (`-Og`) builds once a local
 variable's live range ends or it gets kept purely in a register the compiler reused. If this
 happens for a function's return value right at its `return` statement, use `finish` instead
-(§6.5) — it reads the value from the CPU's actual return-value register, which works regardless
+(§7.5) — it reads the value from the CPU's actual return-value register, which works regardless
 of local-variable debug-info gaps.
 
 ### 6.4 Conditional breakpoints (essential for noisy call sites)
@@ -395,14 +538,14 @@ trusting memorized values, since the exact ordering can shift between mbedtls ve
    broad/unconditional breakpoints on frequently-hit lines waste many round-trips confirming
    benign hits.
 4. For live network/timing-sensitive code, always prefer auto-continuing scripted breakpoints
-   (§6.5) over manual pause-inspect-resume.
+   (§7.5) over manual pause-inspect-resume.
 5. After a debugging session that involved real pauses, always re-test with a **clean
    power-cycle and no debugger attached** before trusting any result — a paused session can
    itself corrupt state and produce misleading follow-up symptoms.
 
 ---
 
-## 7. Final architecture
+## 8. Final architecture
 
 | File | Role |
 |---|---|
@@ -419,7 +562,7 @@ trusting memorized values, since the exact ordering can shift between mbedtls ve
 | `mbedtls_config.h` | mbedtls configuration, including every fix from §5.5-5.6 |
 | `certs/` (gitignored) | Raw PEM files downloaded from AWS |
 
-## 8. Known tradeoffs / future work
+## 9. Known tradeoffs / future work
 
 - **TLS hostname verification is disabled** (§5.6) — the pragmatic choice given lwIP's `mqtt.c`
   API gap, not a default that should be assumed safe in a different context. Revisit if this

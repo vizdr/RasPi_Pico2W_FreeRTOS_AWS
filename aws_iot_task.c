@@ -3,6 +3,7 @@
 #include "wifi_task.h"
 #include "time_task.h"
 #include "temp_task.h"
+#include "humiture_task.h"
 
 #include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
@@ -162,9 +163,23 @@ void aws_iot_task(__unused void *params) {
 
         // Publish periodically for as long as the connection holds.
         while (mqtt_client_is_connected(client)) {
-            char payload[64];
-            int len = snprintf(payload, sizeof(payload), "{\"temperature_c\":%.2f}",
+            char payload[96];
+            int len;
+
+            // temperature_c stays the RP2350's own die reading (temp_task) for backward
+            // compatibility; ambient_temp_c/humidity_pct are the DHT11's actual room
+            // readings, added only when humiture_task has a non-stale sample.
+            dht_reading_t dht;
+            if (humiture_get_latest(&dht, NULL)) {
+                len = snprintf(payload, sizeof(payload),
+                                "{\"temperature_c\":%.2f,\"ambient_temp_c\":%.1f,\"humidity_pct\":%.1f}",
+                                (double)temp_task_get_last_celsius(),
+                                (double)dht_temperature_c(&dht),
+                                (double)dht_humidity_pct(&dht));
+            } else {
+                len = snprintf(payload, sizeof(payload), "{\"temperature_c\":%.2f}",
                                 (double)temp_task_get_last_celsius());
+            }
 
             cyw43_arch_lwip_begin();
             err_t perr = mqtt_publish(client, AWS_IOT_TELEMETRY_TOPIC, payload, (u16_t)len,
