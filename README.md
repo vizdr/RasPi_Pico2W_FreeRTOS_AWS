@@ -1,4 +1,4 @@
-# blink_freertos
+# FreeRTOS and AWS IoT MQTT on Raspberry Pi Pico 2 W
 
 FreeRTOS on a Raspberry Pi Pico 2 W (RP2350 + CYW43439 WiFi), starting from a blinking LED and
 ending with a working telemetry pipeline: onboard temperature + DHT11 humidity/ambient-temperature
