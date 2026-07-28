@@ -7,6 +7,10 @@ readings, published over mutual-TLS MQTT to AWS IoT Core, routed by an IoT Rule 
 Built with the [Raspberry Pi Pico VS Code extension](https://marketplace.visualstudio.com/items?itemName=raspberry-pi.raspberry-pi-pico),
 Pico SDK 2.3.0, and the FreeRTOS-Kernel `RP2350_ARM_NTZ` SMP port.
 
+<p align="center">
+  <img src="AWS-IoT-RPi-Pico.png" width="540">
+</p>
+
 ## What's here
 
 - **WiFi station connection** with automatic reconnect (`wifi_task`)
