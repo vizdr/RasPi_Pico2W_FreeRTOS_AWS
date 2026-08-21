@@ -1,0 +1,12 @@
+{
+  "sql": "SELECT *, topic(1) AS device_id, timestamp() AS ingest_ts FROM 'pico2w-VZ-210726-freertos/telemetry'",
+  "awsIotSqlVersion": "2016-03-23",
+  "ruleDisabled": false,
+  "actions": [
+    {
+      "lambda": {
+        "functionArn": "arn:aws:lambda:eu-central-1:596633517506:function:pico2w-store-telemetry"
+      }
+    }
+  ]
+}

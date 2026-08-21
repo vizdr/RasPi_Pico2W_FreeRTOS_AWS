@@ -17,6 +17,9 @@ Pico SDK 2.3.0, and the FreeRTOS-Kernel `RP2350_ARM_NTZ` SMP port.
 - **SNTP time sync**, required before any TLS certificate validity check can succeed (`time_task`)
 - **Mutual-TLS MQTT client** to AWS IoT Core — device certificate + private key, server identity
   verified against the Amazon Root CA (`aws_iot_task`)
+- **Telemetry Web UI** — a second IoT Rule stores every reading in DynamoDB via Lambda; a
+  REST API (API Gateway + Lambda) serves it to a browser dashboard hosted on S3
+  (`aws_backend/`, `web_ui/`) — no firmware changes needed, runs alongside the existing SQS path
 - **Sensor telemetry**:
   - RP2350's internal die temperature sensor (`temp_task`)
   - DHT11 humidity + ambient temperature over a PIO-based single-wire driver (`humiture_task`,
@@ -102,6 +105,8 @@ is in [AWS-RasPi_PicoW2.md](AWS-RasPi_PicoW2.md).
 | `humiture_task.c/h` | FreeRTOS task wrapping the DHT11 driver; feeds telemetry |
 | `dht.c/h`, `dht.pio` | PIO-based DHT11/DHT22 single-wire driver |
 | `sensor_task.c/h` | I2C MPU6050 example (independent of the AWS IoT path) |
+| `aws_backend/` | Cloud-side telemetry backend: Lambda sources, IAM/bucket policies, IoT Rule definition (see [AWS-Telemetry-WebUI.md](AWS-Telemetry-WebUI.md)) |
+| `web_ui/index.html` | Static browser dashboard for the telemetry, deployed to S3 |
 
 \* gitignored — see [Configuration](#configuration-required-before-first-build) above.
 
@@ -117,6 +122,9 @@ is in [AWS-RasPi_PicoW2.md](AWS-RasPi_PicoW2.md).
   GDB/cortex-debug manual for debugging live network/TLS code.
 - **[README-DHT11.md](README-DHT11.md)** — DHT11 wiring, voltage-level reasoning, and why the
   driver uses PIO instead of bit-banging under FreeRTOS with WiFi/TLS running concurrently.
+- **[AWS-Telemetry-WebUI.md](AWS-Telemetry-WebUI.md)** — the DynamoDB + Lambda + API Gateway + S3
+  telemetry dashboard: architecture, design decisions (DynamoDB over RDS, `topic()`-derived
+  `device_id`), every resource created, verification performed, and redeploy commands.
 
 ## Security notes
 

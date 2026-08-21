@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pico 2 W Telemetry</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.3rem; }
+  .controls { display: flex; gap: .75rem; align-items: end; margin-bottom: 1rem; flex-wrap: wrap; }
+  label { display: block; font-size: .8rem; color: #555; }
+  input, button { padding: .4rem .6rem; font: inherit; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { padding: .4rem .6rem; text-align: right; border-bottom: 1px solid #ddd; }
+  th:nth-child(2), td:nth-child(2), th:last-child, td:last-child { text-align: left; }
+  th { background: #f4f4f4; font-size: .8rem; }
+  #status { margin: .75rem 0; font-size: .85rem; color: #666; }
+  .err { color: #b00; }
+</style>
+</head>
+<body>
+<h1>Pico 2 W telemetry</h1>
+
+<div class="controls">
+  <div>
+    <label for="url">API endpoint</label>
+    <input id="url" size="64"
+        value="https://o4apfjc495.execute-api.eu-central-1.amazonaws.com/telemetry">
+  </div>
+  <div>
+    <label for="limit">Limit</label>
+    <input id="limit" type="number" value="20" min="1" max="500" style="width:5rem">
+  </div>
+  <button id="load">Load</button>
+  <label style="font-size:.85rem"><input type="checkbox" id="auto"> auto-refresh 10s</label>
+</div>
+
+<div id="status"></div>
+<table>
+  <thead><tr><th>#</th><th>Device</th><th>Temp &deg;C</th><th>Ambient &deg;C</th><th>Humidity %</th><th>Reading time</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+
+<script>
+const $ = id => document.getElementById(id);
+let timer = null;
+
+async function load() {
+  const url = new URL($('url').value);
+  url.searchParams.set('limit', $('limit').value);
+  $('status').textContent = 'Loading...';
+  $('status').className = '';
+
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    $('rows').innerHTML = data.readings.map((r, i) => `
+      <tr>
+        <td>${i + 1}</td>
+        <td>${r.device_id}</td>
+        <td>${r.temperature_c?.toFixed(2) ?? '-'}</td>
+        <td>${r.ambient_temp_c?.toFixed(2) ?? '-'}</td>
+        <td>${r.humidity_pct?.toFixed(1) ?? '-'}</td>
+        <td>${new Date(r.reading_ts).toLocaleString()}</td>
+      </tr>`).join('');
+
+    $('status').textContent =
+      `${data.count} readings · updated ${new Date().toLocaleTimeString()}`;
+  } catch (e) {
+    $('status').textContent = `Failed: ${e.message}`;
+    $('status').className = 'err';
+  }
+}
+
+$('load').onclick = load;
+$('auto').onchange = e => {
+  clearInterval(timer);
+  if (e.target.checked) timer = setInterval(load, 10000);
+};
+
+load();
+</script>
+</body>
+</html>
