@@ -138,4 +138,4 @@ is in [AWS-RasPi_PicoW2.md](AWS-RasPi_PicoW2.md).
 
 ## License
 
-No license file yet — all rights reserved by default until one is added.
+[MIT](LICENSE)
