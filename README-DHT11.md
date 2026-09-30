@@ -42,7 +42,7 @@ DHT11 pin order, grille facing you and pins downward, left to right:
 With the module unpowered, on continuity:
 
 | Pad shows continuity to | Pad is | Connect to Pico 2 W |
-|---|---|---|
+| --- | --- | --- |
 | DHT11 pin 1 | VCC | 3V3 OUT (pin 36) — see §3 |
 | DHT11 pin 4 | GND | any GND (pin 38) |
 | DHT11 pin 2 | DATA | GPIO15 |
@@ -78,9 +78,27 @@ The on-board pull-up sits between DATA and the module's VCC net, and those pads
 data line.** Feed it 3V3 and the whole link is 3.3 V referenced: no level shifter,
 no series resistor, pad straight to GPIO15.
 
-That matters because **RP2350 GPIOs are not 5 V tolerant** (abs max ≈
-VDDIO + 0.3 V). Powering the module from 5 V would put 5 V on the data line.
-Soldered access removes both the temptation and the ambiguity.
+Powering the module from 5 V would put 5 V on the data line. GPIO15 is an
+RP2350 **fault-tolerant (FT)** pin, so that is within its rating, but with very
+little margin:
+
+| RP2350 datasheet, FT pins (all Bank 0 GPIOs on the RP2350A, except GPIO26–29) | Limit |
+|---|---|
+| Input high (VIH) / absolute maximum, IOVDD = 3.3 V (Table 1433, §14.9) | 5.5 V |
+| Absolute maximum, IOVDD = 0 V (Pico unpowered) | 3.63 V |
+
+- USB VBUS may legitimately sit at 5.25 V, plus hot-plug transients. That
+  leaves almost none of the 0.5 V headroom.
+- If the module is ever live while the Pico's 3V3 is off, 5 V is well over the
+  3.63 V unpowered limit.
+- The driver's `gpio_pull_up()` would feed current from the 5 V line back
+  into the 3V3 rail.
+
+The ADC-capable GPIO26–29 are standard pins, limited to IOVDD + 0.5 V; don't
+put this sensor on them at all.
+
+3V3 avoids every one of these issues, and soldered access makes it the easy
+choice.
 
 ### The check
 

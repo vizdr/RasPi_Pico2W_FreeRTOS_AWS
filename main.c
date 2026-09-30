@@ -15,6 +15,7 @@
 #include "time_task.h"
 #include "wifi_task.h"
 #include "humiture_task.h"
+#include "pir_task.h"
 
 void vApplicationMallocFailedHook(void) {
     panic("malloc failed");
@@ -58,6 +59,8 @@ int main(void) {
     // TLS handshake work is stack-hungry (mbedtls), hence the larger allowance here.
     xTaskCreate(aws_iot_task, "AwsIot", 2048, NULL, tskIDLE_PRIORITY + 1, NULL);
     humiture_task_start(tskIDLE_PRIORITY + 1);   /* low priority; it only sleeps */
+    // One above the others so motion start/stop is handled promptly after its ISR fires.
+    pir_task_start(tskIDLE_PRIORITY + 2);
 
 
     vTaskStartScheduler();

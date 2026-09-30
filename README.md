@@ -25,6 +25,8 @@ Pico SDK 2.3.0, and the FreeRTOS-Kernel `RP2350_ARM_NTZ` SMP port.
   - DHT11 humidity + ambient temperature over a PIO-based single-wire driver (`humiture_task`,
     `dht.c/h/.pio`) — no bit-banging, no interrupt-masking, the PIO state machine does the
     microsecond-level timing in hardware while the task just sleeps
+  - Makeblock Me PIR Motion Sensor v1.1, interrupt driven: GPIO edge ISR → queue → task, with
+    weak `pir_on_motion_start()` / `pir_on_motion_stop()` hooks (`pir_task`)
   - I2C MPU6050 accelerometer example, not currently wired to real hardware (`sensor_task`)
 - **AWS IoT Rule → SQS** — telemetry is routed from the device's MQTT topic into an SQS queue for
   downstream consumption, independent of the MQTT test client
@@ -35,6 +37,7 @@ Pico SDK 2.3.0, and the FreeRTOS-Kernel `RP2350_ARM_NTZ` SMP port.
 |---|---|
 | Board | Raspberry Pi Pico 2 W (RP2350, Cortex-M33, CYW43439 WiFi/BT) |
 | DHT11 | Makeblock Me Humiture Sensor (a DHT11 clone) — DATA on GPIO15, 3V3, GND. See [README-DHT11.md](README-DHT11.md) for wiring, voltage-level details, and why this uses PIO instead of bit-banging. |
+| PIR | Makeblock Me PIR Motion Sensor v1.1 — OUT on GPIO14, VCC from VBUS (5 V), GND. Output high level is ~3.8 V; see [README-PIR.md](README-PIR.md) for why that is fine on a non-ADC GPIO. |
 | MPU6050 | I2C0, SDA=GPIO4, SCL=GPIO5 — driver present, not physically wired |
 | Debug | Raspberry Pi Debug Probe (CMSIS-DAP + UART bridge) |
 
@@ -104,6 +107,7 @@ is in [AWS-RasPi_PicoW2.md](AWS-RasPi_PicoW2.md).
 | `temp_task.c/h` | Internal RP2350 temperature sensor; feeds telemetry |
 | `humiture_task.c/h` | FreeRTOS task wrapping the DHT11 driver; feeds telemetry |
 | `dht.c/h`, `dht.pio` | PIO-based DHT11/DHT22 single-wire driver |
+| `pir_task.c/h` | PIR motion sensor: edge ISR, motion start/stop hooks, `pir_get_status()` |
 | `sensor_task.c/h` | I2C MPU6050 example (independent of the AWS IoT path) |
 | `aws_backend/` | Cloud-side telemetry backend: Lambda sources, IAM/bucket policies, IoT Rule definition (see [AWS-Telemetry-WebUI.md](AWS-Telemetry-WebUI.md)) |
 | `web_ui/index.html` | Static browser dashboard for the telemetry, deployed to S3 |
@@ -122,6 +126,8 @@ is in [AWS-RasPi_PicoW2.md](AWS-RasPi_PicoW2.md).
   GDB/cortex-debug manual for debugging live network/TLS code.
 - **[README-DHT11.md](README-DHT11.md)** — DHT11 wiring, voltage-level reasoning, and why the
   driver uses PIO instead of bit-banging under FreeRTOS with WiFi/TLS running concurrently.
+- **[README-PIR.md](README-PIR.md)** — PIR wiring, the 3.8 V output level vs. RP2350 GPIO
+  ratings, and the ISR → queue → task design sharing `IO_IRQ_BANK0` with the CYW43 driver.
 - **[AWS-Telemetry-WebUI.md](AWS-Telemetry-WebUI.md)** — the DynamoDB + Lambda + API Gateway + S3
   telemetry dashboard: architecture, design decisions (DynamoDB over RDS, `topic()`-derived
   `device_id`), every resource created, verification performed, and redeploy commands.

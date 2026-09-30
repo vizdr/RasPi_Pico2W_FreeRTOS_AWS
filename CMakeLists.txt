@@ -54,6 +54,7 @@ add_executable(blink_freertos
     wifi_task.c
     dht.c
     humiture_task.c
+    pir_task.c
     )
 
 # Generate PIO header for dht.pio (must come after add_executable: it calls

@@ -5,3 +5,6 @@ build
 certs/
 wifi_credentials.h
 aws_credentials.c
+
+# Lambda deployment artifacts (rebuild with: cd aws_backend && zip -q *.zip *.py)
+aws_backend/*.zip
