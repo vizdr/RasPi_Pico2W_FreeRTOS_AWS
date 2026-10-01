@@ -4,3 +4,4 @@
 #include "dht.h"
 bool humiture_task_start(UBaseType_t priority);
 bool humiture_get_latest(dht_reading_t *out, uint32_t *age_ms);
+void humiture_on_sample(const dht_reading_t *r); // weak hook, override to act on new samples

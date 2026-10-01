@@ -6,7 +6,8 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
-// Makeblock Me PIR Motion Sensor v1.1 - see pir_task.c and README-PIR.md.
+// FreeRTOS service for the Makeblock Me PIR Motion Sensor v1.1 - the hardware
+// driver is pir.c/h. See README-PIR.md.
 
 typedef struct {
     bool     motion;            // output currently high
@@ -14,12 +15,16 @@ typedef struct {
     uint32_t last_change_ms;    // ms since boot of the last start/stop
 } pir_status_t;
 
-// Configures the GPIO and registers the edge ISR, then creates the task.
+// Initialises the driver (pins, edge ISR, retriggerable mode), then creates the task.
 // Call once from main(), before vTaskStartScheduler().
 bool pir_task_start(UBaseType_t priority);
 
 // Returns false while the sensor is still in its power-up warm-up period.
 bool pir_get_status(pir_status_t *out);
+
+// Trigger mode via RJ25 S1 (true = retriggerable). No-op if S1 is not wired
+// (PIR_MODE_GPIO == PIR_NO_PIN) or before pir_task_start().
+void pir_task_set_retrigger(bool retriggerable);
 
 // Weak hooks, called from the pir task (not the ISR) - override to act on motion.
 // Keep them short and non-blocking: post to a queue and return.

@@ -15,24 +15,33 @@ The firmware maps the two edges to two events:
 | rising | motion start | `pir_on_motion_start()` |
 | falling | motion stop | `pir_on_motion_stop(duration_ms)` |
 
-If the module's trigger mode is selectable, use the **repeatable / retriggerable**
-mode. The output then stays high for as long as movement continues, so one
-start/stop pair means one period of activity. In single-trigger mode the output
-drops after the hold time even while someone is still moving, and you get
-several short start/stop pairs instead.
+The trigger mode is set by the BISS0001's **A** input, wired to RJ25 **S1**
+(Makeblock: `SetPirMotionMode()` → `dWrite1()`; 1 = retriggerable). The firmware
+drives S1 high at start-up to select **retriggerable** mode. The output then
+stays high for as long as movement continues, so one start/stop pair means one
+period of activity. In single-trigger mode the output drops after the hold
+time even while someone is still moving, and you get several short start/stop
+pairs instead. `pir_task_set_retrigger(false)` switches to single-trigger mode
+at runtime.
 
 ## 2. Wiring: soldered to the pads next to the RJ25 jack
 
 | Module pad | Connect to Pico 2 W |
-|---|---|
+| --- | --- |
 | VCC | VBUS (pin 40) = 5 V when USB powered, or VSYS (pin 39) |
-| GND | GND (pin 18, next to GPIO14) |
+| GND | GND (pin 18, between GPIO13 and GPIO14) |
 | OUT (the pad you measured, RJ25 S2) | **GPIO14 (pin 19)** |
+| MODE (RJ25 S1) | **GPIO13 (pin 17)** |
 
-GPIO14 is a plain digital pin: not an ADC input, not used by UART0 stdio
-(GPIO0/1), I2C0 (GPIO4/5) or the DHT11 (GPIO15). To use another pin, change
-`PIR_GPIO` in `pir_task.c` (or pass `-DPIR_GPIO=n`), and keep away from the
-ADC-capable GPIO26–29.
+GPIO13 and GPIO14 are plain digital pins: not ADC inputs, not used by UART0
+stdio (GPIO0/1), I2C0 (GPIO4/5) or the DHT11 (GPIO15). To use other pins,
+change `PIR_GPIO` / `PIR_MODE_GPIO` in `pir_task.c` (or pass `-DPIR_GPIO=n`),
+and keep away from the ADC-capable GPIO26–29. If S1 is not wired, set
+`PIR_MODE_GPIO` to `PIR_NO_PIN`; the module's own default mode then applies.
+
+GPIO13 is a 3.3 V push-pull output. The BISS0001 runs from roughly the same
+~3.8 V that appears on its output, so 3.3 V should read as a logic high on A.
+Confirm on the bench (§6, step 4).
 
 ## 3. The 3.8 V output level
 
@@ -74,18 +83,34 @@ Source: [RP2350 datasheet](https://datasheets.raspberrypi.com/rp2350/rp2350-data
 
 ## 4. Firmware design
 
+The code is split the same way as the DHT11 (`dht.c` driver, `humiture_task.c`
+service):
+
+| Layer | Files | Owns |
+| --- | --- | --- |
+| Driver | `pir.c/h` | Pin setup, trigger mode (S1), `pir_read()`, the GPIO ISR. No FreeRTOS. |
+| Service | `pir_task.c/h` | Queue, task, warm-up, start/stop state, logging, hooks, `pir_get_status()` |
+
 ```
-PIR OUT ──► GPIO14 edge IRQ ──► pir_gpio_isr() ──queue──► pir task ──► hooks + status
-             (rise + fall)      ack, level, time_ms       start/stop,     pir_on_motion_*()
-                                                          count, log      pir_get_status()
+             pir.c (driver)                          pir_task.c (service)
+PIR OUT ──► GPIO14 edge IRQ ──► pir_gpio_isr() ──cb──► pir_on_edge_isr() ──queue──► pir task ──► hooks + status
+(S2)        (rise + fall)       ack, level, time_ms    xQueueSendFromISR             start/stop,  pir_on_motion_*()
+                                                                                    count, log   pir_get_status()
+
+MODE    ◄── GPIO13 output ◄──── pir_set_retrigger() ◄──── pir_task_set_retrigger()
+(S1)
 ```
 
-- **ISR** (`pir_gpio_isr`): the ISR is registered with `gpio_add_raw_irq_handler()`,
-  not `gpio_set_irq_enabled_with_callback()`. `IO_IRQ_BANK0` is shared with the
-  CYW43 driver, which has its own raw handler for `WL_HOST_WAKE` (GPIO24). The ISR
-  checks and acknowledges only its own pin. It samples the *current level* and a
-  timestamp and posts them to a queue with `xQueueSendFromISR()`. It does no
-  printing and nothing that blocks. The IRQ runs at the SDK default priority
+- **Driver ISR** (`pir_gpio_isr`): the ISR is registered with
+  `gpio_add_raw_irq_handler()`, not `gpio_set_irq_enabled_with_callback()`.
+  `IO_IRQ_BANK0` is shared with the CYW43 driver, which has its own raw handler
+  for `WL_HOST_WAKE` (GPIO24). The ISR checks and acknowledges only its own pin,
+  samples the *current level* and a timestamp, and passes them to the callback
+  given to `pir_irq_enable()`. SDK raw handlers take no context argument, so the
+  driver supports one sensor (a second `pir_init()` returns `false`).
+- **Edge callback** (`pir_on_edge_isr`, in `pir_task.c`): still interrupt
+  context. It posts the event to a queue with `xQueueSendFromISR()` and does
+  no printing and nothing that blocks. The IRQ runs at the SDK default priority
   (0x80), which is below `configMAX_SYSCALL_INTERRUPT_PRIORITY` (16), so the
   FromISR API is legal there.
 - **Task** (`pir`, priority idle+2): the task turns the level into a transition
@@ -94,8 +119,9 @@ PIR OUT ──► GPIO14 edge IRQ ──► pir_gpio_isr() ──queue──► 
     dropped;
   - a lost edge is recovered by a pin re-read every `PIR_RESYNC_MS` (1 s).
 - **Warm-up**: PIR elements give false triggers for a while after power-up.
-  Edge interrupts are enabled only after `PIR_WARMUP_MS` (30 s). Edges latched
-  during that time are acknowledged and discarded. `pir_get_status()` returns
+  Edge interrupts are enabled only after `PIR_WARMUP_MS` (30 s, defined in
+  `pir.h` as a sensor property). `pir_irq_enable()` acknowledges and discards
+  the edges latched during that time. `pir_get_status()` returns
   `false` until then.
 
 ## 5. Using the events
@@ -129,7 +155,10 @@ To read the state instead, call `pir_get_status(&st)`. It returns
 3. Nothing ever triggers: check with a meter that OUT goes high on motion at the
    pad. Then check that it reaches pin 19, and not pin 20 (GPIO15, the DHT11).
 4. `motion stop` arrives only seconds after `start` although movement continues:
-   the module is in single-trigger mode, or the hold-time pot is at minimum.
+   the module is in single-trigger mode. Check that S1 is wired to pin 17 and
+   reads ~3.3 V; if it does and the behaviour persists, 3.3 V may be too low a
+   logic high for the module's A input. Otherwise the hold-time pot is at
+   minimum.
 5. `event queue overflowed`: the input is toggling far faster than any PIR
    can. Look for a floating or loose wire, or a long unshielded run beside the
    WiFi antenna.

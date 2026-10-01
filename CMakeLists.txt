@@ -54,6 +54,7 @@ add_executable(blink_freertos
     wifi_task.c
     dht.c
     humiture_task.c
+    pir.c
     pir_task.c
     )
 

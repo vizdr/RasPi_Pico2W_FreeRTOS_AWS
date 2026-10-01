@@ -1,27 +1,25 @@
 /**
  * @file pir_task.c
- * @brief Makeblock Me PIR Motion Sensor v1.1 on Pico 2 W, interrupt driven.
+ * @brief FreeRTOS service for the Makeblock Me PIR Motion Sensor on Pico 2 W.
  *
- * The sensor's digital output is high while motion is being detected (for at
- * least the hold time set by its potentiometer). Both edges raise a GPIO IRQ:
+ * Owns the sensor exclusively (driver: pir.c/h). The driver's edge callback
+ * runs in the ISR and only pushes the sampled level and timestamp to a queue;
+ * this task does the rest:
  *
- *   rising edge  -> motion start
- *   falling edge -> motion stop
+ *   level goes high -> motion start
+ *   level goes low  -> motion stop
  *
- * The ISR does the minimum - acknowledge, sample the pin level, timestamp,
- * push to a queue - and the pir task does the rest (state, logging, hooks).
  * That is the usual FreeRTOS deferred-interrupt pattern: nothing that can
  * block or take long runs in interrupt context.
  */
 
 #include "pir_task.h"
+#include "pir.h"
 
 #include "FreeRTOS.h"
 #include "task.h"
 #include "queue.h"
 
-#include "hardware/gpio.h"
-#include "hardware/irq.h"
 #include "pico/time.h"
 
 #include <stdio.h>
@@ -29,13 +27,11 @@
 /* ---- configuration ------------------------------------------------------ */
 
 #ifndef PIR_GPIO
-#define PIR_GPIO                 14u     /* physical pin 19; not an ADC pin */
+#define PIR_GPIO                 14u     /* physical pin 19; RJ25 S2; not an ADC pin */
 #endif
 
-/* PIR modules report false triggers while the pyroelectric element settles
- * after power-up. Edges are not enabled until this has elapsed. */
-#ifndef PIR_WARMUP_MS
-#define PIR_WARMUP_MS            30000u
+#ifndef PIR_MODE_GPIO
+#define PIR_MODE_GPIO            13      /* physical pin 17; RJ25 S1; PIR_NO_PIN = not wired */
 #endif
 
 /* Safety net: if an edge is ever lost (queue full, glitch shorter than the
@@ -43,7 +39,6 @@
 #define PIR_RESYNC_MS            1000u
 
 #define PIR_QUEUE_LEN            8u
-#define PIR_EDGES                (GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL)
 
 /* ---- shared state ------------------------------------------------------- */
 
@@ -52,6 +47,8 @@ typedef struct {
     bool     level;
 } pir_event_t;
 
+/* mode_pin preset so pir_task_set_retrigger() is a no-op before start. */
+static pir_t             s_dev = { .mode_pin = PIR_NO_PIN };
 static QueueHandle_t     s_queue;
 static pir_status_t      s_status;
 static volatile bool     s_ready;
@@ -79,27 +76,21 @@ bool pir_get_status(pir_status_t *out)
     return true;
 }
 
-/* ---- ISR ---------------------------------------------------------------- */
-
-/* Raw handler on the shared IO_IRQ_BANK0 vector: the CYW43 driver has its own
- * raw handler there for WL_HOST_WAKE, so this must only look at, and only
- * acknowledge, its own pin. IO_IRQ_BANK0 runs at PICO_DEFAULT_IRQ_PRIORITY
- * (0x80), numerically above configMAX_SYSCALL_INTERRUPT_PRIORITY (16), so the
- * FromISR API is allowed here. */
-static void pir_gpio_isr(void)
+void pir_task_set_retrigger(bool retriggerable)
 {
-    uint32_t events = gpio_get_irq_event_mask(PIR_GPIO) & PIR_EDGES;
-    if (events == 0) {
-        return;
-    }
-    gpio_acknowledge_irq(PIR_GPIO, events);
+    pir_set_retrigger(&s_dev, retriggerable);
+}
 
-    /* The current level, not the edge type, is what the task acts on: if a
-     * rise and a fall were both latched before we got here, the level says
-     * which one came last. */
+/* ---- ISR side ----------------------------------------------------------- */
+
+/* Driver edge callback, interrupt context. IO_IRQ_BANK0 runs at
+ * PICO_DEFAULT_IRQ_PRIORITY (0x80), numerically above
+ * configMAX_SYSCALL_INTERRUPT_PRIORITY (16), so the FromISR API is allowed. */
+static void pir_on_edge_isr(bool level, uint32_t time_ms)
+{
     pir_event_t ev = {
-        .time_ms = to_ms_since_boot(get_absolute_time()),
-        .level   = gpio_get(PIR_GPIO),
+        .time_ms = time_ms,
+        .level   = level,
     };
 
     BaseType_t woken = pdFALSE;
@@ -143,15 +134,14 @@ static void pir_task(void *arg)
     printf("[pir] warming up for %u s\n", (unsigned)(PIR_WARMUP_MS / 1000u));
     vTaskDelay(pdMS_TO_TICKS(PIR_WARMUP_MS));
 
-    /* Edges are latched in INTR even while disabled - drop the ones from the
-     * warm-up period before enabling, then take the starting level directly. */
-    gpio_acknowledge_irq(PIR_GPIO, PIR_EDGES);
-    gpio_set_irq_enabled(PIR_GPIO, PIR_EDGES, true);
+    /* Enabling drops the edges latched during warm-up; the starting level is
+     * then taken directly. */
+    pir_irq_enable(&s_dev, pir_on_edge_isr);
 
     s_status.last_change_ms = to_ms_since_boot(get_absolute_time());
     s_ready = true;
     printf("[pir] ready\n");
-    pir_apply(gpio_get(PIR_GPIO), s_status.last_change_ms);
+    pir_apply(pir_read(&s_dev), s_status.last_change_ms);
 
     uint32_t reported_overflows = 0;
 
@@ -160,7 +150,7 @@ static void pir_task(void *arg)
         if (xQueueReceive(s_queue, &ev, pdMS_TO_TICKS(PIR_RESYNC_MS)) == pdTRUE) {
             pir_apply(ev.level, ev.time_ms);
         } else {
-            pir_apply(gpio_get(PIR_GPIO), to_ms_since_boot(get_absolute_time()));
+            pir_apply(pir_read(&s_dev), to_ms_since_boot(get_absolute_time()));
         }
 
         if (s_queue_overflows != reported_overflows) {
@@ -178,18 +168,11 @@ bool pir_task_start(UBaseType_t priority)
         return false;
     }
 
-    /* The sensor drives the line actively both ways, so no internal pulls are
-     * needed (and the RP2350 pull-down is unreliable anyway, erratum E9).
-     * Its ~3.8 V high level is fine: GPIO14 is a fault-tolerant pin, VIH up
-     * to 5.5 V while IOVDD is powered - see README-PIR.md. */
-    gpio_init(PIR_GPIO);
-    gpio_set_dir(PIR_GPIO, GPIO_IN);
-    gpio_disable_pulls(PIR_GPIO);
-
-    /* Registered now (core 0, before the scheduler), but the pin's edge
-     * events stay disabled until the task finishes warm-up. */
-    gpio_add_raw_irq_handler(PIR_GPIO, pir_gpio_isr);
-    irq_set_enabled(IO_IRQ_BANK0, true);
+    /* Retriggerable: the output stays high while motion continues, so one
+     * start/stop pair is one period of activity. */
+    if (!pir_init(&s_dev, PIR_GPIO, PIR_MODE_GPIO, true)) {
+        return false;
+    }
 
     return xTaskCreate(pir_task, "pir", 512, NULL, priority, NULL) == pdPASS;
 }
