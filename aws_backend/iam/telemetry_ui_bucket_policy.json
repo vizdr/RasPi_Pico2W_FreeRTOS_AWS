@@ -2,10 +2,16 @@
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Sid": "AllowCloudFrontServicePrincipal",
       "Effect": "Allow",
-      "Principal": "*",
+      "Principal": { "Service": "cloudfront.amazonaws.com" },
       "Action": "s3:GetObject",
-      "Resource": "arn:aws:s3:::pico2w-telemetry-ui-596633517506/*"
+      "Resource": "arn:aws:s3:::pico2w-telemetry-ui-596633517506/*",
+      "Condition": {
+        "StringEquals": {
+          "AWS:SourceArn": "arn:aws:cloudfront::596633517506:distribution/E1910G7OJTPGYC"
+        }
+      }
     }
   ]
 }

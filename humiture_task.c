@@ -58,6 +58,19 @@ void humiture_on_sample(const dht_reading_t *r)
     (void)r;
 }
 
+void humiture_get_diag(dht_status_t *last_status, uint32_t *error_count)
+{
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+        if (last_status) {
+            *last_status = s_state.last_status;
+        }
+        if (error_count) {
+            *error_count = s_state.error_count;
+        }
+        xSemaphoreGive(s_lock);
+    }
+}
+
 bool humiture_get_latest(dht_reading_t *out, uint32_t *age_ms)
 {
     bool ok = false;

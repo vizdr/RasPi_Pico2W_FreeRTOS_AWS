@@ -17,9 +17,10 @@ Pico SDK 2.3.0, and the FreeRTOS-Kernel `RP2350_ARM_NTZ` SMP port.
 - **SNTP time sync**, required before any TLS certificate validity check can succeed (`time_task`)
 - **Mutual-TLS MQTT client** to AWS IoT Core — device certificate + private key, server identity
   verified against the Amazon Root CA (`aws_iot_task`)
-- **Telemetry Web UI** — a second IoT Rule stores every reading in DynamoDB via Lambda; a
-  REST API (API Gateway + Lambda) serves it to a browser dashboard hosted on S3
-  (`aws_backend/`, `web_ui/`) — no firmware changes needed, runs alongside the existing SQS path
+- **Telemetry Web UI** — a second IoT Rule stores every reading in DynamoDB via Lambda; a REST
+  API (API Gateway + Lambda) serves it to a Chart.js line-graph dashboard, fronted by CloudFront
+  for HTTPS and a password gate (`aws_backend/`, `web_ui/`) — no firmware changes needed for the
+  core pipeline, runs alongside the existing SQS path
 - **Sensor telemetry**:
   - RP2350's internal die temperature sensor (`temp_task`)
   - DHT11 humidity + ambient temperature over a PIO-based single-wire driver (`humiture_task`,
@@ -110,8 +111,8 @@ is in [AWS-RasPi_PicoW2.md](AWS-RasPi_PicoW2.md).
 | `pir_task.c/h` | FreeRTOS task wrapping the PIR driver: motion start/stop hooks, `pir_get_status()` |
 | `pir.c/h` | PIR motion sensor driver: pins, trigger mode, GPIO edge ISR (no FreeRTOS) |
 | `sensor_task.c/h` | I2C MPU6050 example (independent of the AWS IoT path) |
-| `aws_backend/` | Cloud-side telemetry backend: Lambda sources, IAM/bucket policies, IoT Rule definition (see [AWS-Telemetry-WebUI.md](AWS-Telemetry-WebUI.md)) |
-| `web_ui/index.html` | Static browser dashboard for the telemetry, deployed to S3 |
+| `aws_backend/` | Cloud-side telemetry backend: Lambda sources, IAM/bucket policies, IoT Rule, CloudFront distribution config (see [AWS-Telemetry-WebUI.md](AWS-Telemetry-WebUI.md)) |
+| `web_ui/index.html` | Browser dashboard (table + Chart.js line graph), deployed to S3, served via CloudFront (HTTPS + password gate) |
 
 \* gitignored — see [Configuration](#configuration-required-before-first-build) above.
 
@@ -129,9 +130,11 @@ is in [AWS-RasPi_PicoW2.md](AWS-RasPi_PicoW2.md).
   driver uses PIO instead of bit-banging under FreeRTOS with WiFi/TLS running concurrently.
 - **[README-PIR.md](README-PIR.md)** — PIR wiring, the 3.8 V output level vs. RP2350 GPIO
   ratings, and the ISR → queue → task design sharing `IO_IRQ_BANK0` with the CYW43 driver.
-- **[AWS-Telemetry-WebUI.md](AWS-Telemetry-WebUI.md)** — the DynamoDB + Lambda + API Gateway + S3
-  telemetry dashboard: architecture, design decisions (DynamoDB over RDS, `topic()`-derived
-  `device_id`), every resource created, verification performed, and redeploy commands.
+- **[AWS-Telemetry-WebUI.md](AWS-Telemetry-WebUI.md)** — the DynamoDB + Lambda + API Gateway +
+  CloudFront telemetry dashboard: architecture, design decisions (DynamoDB over RDS,
+  `topic()`-derived `device_id`, CloudFront Function Basic Auth over Cognito), every resource
+  created, a real intermittent-sensor debugging story, verification performed, and redeploy
+  commands (including rotating the dashboard password).
 
 ## Security notes
 
@@ -142,6 +145,10 @@ is in [AWS-RasPi_PicoW2.md](AWS-RasPi_PicoW2.md).
   chain is still fully verified against the Amazon Root CA, but the CN/SAN isn't checked against
   the endpoint hostname. Revisit before using this as a template for anything more
   security-sensitive.
+- `aws_backend/cloudfront_basic_auth_function.js` (the dashboard's real login credential) is
+  gitignored, same pattern as above — only the placeholder `.js.example` is committed. See
+  [AWS-Telemetry-WebUI.md](AWS-Telemetry-WebUI.md) §7 for the tradeoffs of the Basic Auth
+  approach itself (shared single-user password, credential stored in cleartext at the edge).
 
 ## License
 

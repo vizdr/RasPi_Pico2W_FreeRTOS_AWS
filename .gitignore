@@ -5,6 +5,7 @@ build
 certs/
 wifi_credentials.h
 aws_credentials.c
+aws_backend/cloudfront_basic_auth_function.js
 
 # Lambda deployment artifacts (rebuild with: cd aws_backend && zip -q *.zip *.py)
 aws_backend/*.zip

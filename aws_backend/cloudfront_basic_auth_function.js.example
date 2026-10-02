@@ -1,0 +1,24 @@
+// CloudFront Function (viewer-request): gates the whole distribution behind HTTP Basic Auth.
+//
+// EXPECTED_AUTH is "Basic " + base64("<username>:<password>") - generate it with:
+//   printf '<username>:<password>' | base64
+//
+// The real, deployed version of this file (with the actual credential baked in) is
+// aws_backend/cloudfront_basic_auth_function.js, which is gitignored - never commit it.
+function handler(event) {
+    var request = event.request;
+    var headers = request.headers;
+    var EXPECTED_AUTH = "Basic <base64-goes-here>";
+
+    if (!headers.authorization || headers.authorization.value !== EXPECTED_AUTH) {
+        return {
+            statusCode: 401,
+            statusDescription: "Unauthorized",
+            headers: {
+                "www-authenticate": { value: 'Basic realm="Pico2w Telemetry", charset="UTF-8"' }
+            }
+        };
+    }
+
+    return request;
+}

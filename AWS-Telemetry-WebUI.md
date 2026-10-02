@@ -2,42 +2,53 @@
 
 This document covers an extension to the AWS IoT Core integration described in
 [AWS-RasPi_PicoW2.md](AWS-RasPi_PicoW2.md): a second, parallel telemetry path that stores every
-reading in a database and serves it to a browser dashboard, adapting the pattern from a separate
-Raspberry Pi 4B / Python course project (pseudo-sensor → MQTT → IoT Core → Rule → Lambda → RDS →
-API Gateway → Lambda → HTML UI) to this project's existing FreeRTOS firmware.
+reading in a database and serves it to a password-protected, HTTPS browser dashboard with
+Chart.js line graphs, adapting the pattern from a separate Raspberry Pi 4B / Python course project
+(pseudo-sensor → MQTT → IoT Core → Rule → Lambda → RDS → API Gateway → Lambda → HTML UI) to this
+project's existing FreeRTOS firmware.
 
-**No firmware changes were needed.** The Pico 2 W already publishes telemetry JSON
-(`temperature_c`, `ambient_temp_c`, `humidity_pct`) to AWS IoT Core over mutual-TLS MQTT (see
-`aws_iot_task.c`) and an existing IoT Rule already forwards it to SQS. Everything below is a
-second rule + a small serverless backend added alongside that, on the AWS side only. The original
-SQS path is untouched.
+**No firmware changes were needed for the core pipeline.** The Pico 2 W already publishes
+telemetry JSON (`temperature_c`, `ambient_temp_c`, `humidity_pct`) to AWS IoT Core over
+mutual-TLS MQTT (see `aws_iot_task.c`) and an existing IoT Rule already forwards it to SQS.
+Everything in Phases 1–6 is a second rule + a small serverless backend added alongside that, on
+the AWS side only. The original SQS path is untouched. Phases 7–11 added a line-chart dashboard,
+HTTPS, and password protection (AWS-side + a small, optional firmware diagnostics addition — see
+§5.2).
 
 ---
 
 ## 1. Architecture
 
 ```
-Pico 2 W (unchanged) --MQTT/TLS--> AWS IoT Core
-                                        |
-                    +-------------------+------------------------+
-                    | (existing rule, untouched)      (new rule) |
-                    v                                             v
-             SQS queue (kept)                         Lambda: pico2w-store-telemetry
-                                                                    |
-                                                                    v
-                                                    DynamoDB table: Pico2wTelemetry
-                                                                    ^
-                                                                    | Query
-                                                          Lambda: pico2w-get-telemetry
-                                                                    ^
-                                                                    | HTTP API (CORS enabled)
-                                                          API Gateway: GET /telemetry
-                                                                    ^
-                                                                    | fetch()
-                                                  S3 static website (web_ui/index.html)
+Browser --HTTPS--> CloudFront (single distribution, default *.cloudfront.net domain)
+                      |
+                      +-- CloudFront Function (viewer-request, every path): HTTP Basic Auth gate
+                      |
+                      +-- behavior "/*"          --> S3 origin (private, via Origin Access Control)
+                      |                               |
+                      |                               v
+                      |                         web_ui/index.html (Chart.js dashboard)
+                      |
+                      +-- behavior "/telemetry*" --> API Gateway origin (+ shared-secret header)
+                                                          |
+                                                          v
+                                                Lambda: pico2w-get-telemetry (verifies the secret)
+                                                          |
+                                                          v
+                                                DynamoDB table: Pico2wTelemetry
+                                                          ^
+                                                          | PutItem
+                                                Lambda: pico2w-store-telemetry
+                                                          ^
+                                                          | (new rule)
+Pico 2 W (unchanged) --MQTT/TLS--> AWS IoT Core --+
+                                                   | (existing rule, untouched)
+                                                   v
+                                             SQS queue (kept)
 ```
 
-Region: `eu-central-1`. Account: `596633517506`.
+Region: `eu-central-1` for all telemetry resources; `us-east-1` for CloudFront Functions (a
+CloudFront-API-wide requirement — the distribution itself is global). Account: `596633517506`.
 
 ---
 
@@ -62,6 +73,23 @@ touches firmware or the existing SQS rule):
    response, CloudWatch Logs checked for errors, CORS confirmed against the actual site origin, the
    pre-existing SQS path confirmed still unaffected, and the dashboard opened in a real browser.
 6. **Documentation** — this file, plus the [README.md](README.md) updates.
+
+Phases 7–12 (added afterward, same dependency-order principle): HTTPS and password protection for
+the dashboard, requested once the core pipeline was already working end-to-end.
+
+7. **Chart.js line graphs** — a line chart with points added to `web_ui/index.html` (Chart.js via
+   CDN, no build step), alongside the existing table.
+8. **CloudFront + HTTPS** — an Origin Access Control (OAC) and a CloudFront distribution put in
+   front of the S3 bucket; the bucket flips from public-read to private (CloudFront-only).
+9. **Password gate** — a CloudFront Function implementing HTTP Basic Auth, tested against sample
+   events before going live, then associated with the distribution.
+10. **API routed through CloudFront too** — API Gateway added as a second CloudFront origin/behavior
+    (same password gate), plus a shared-secret header that `pico2w-get-telemetry` validates so the
+    raw API Gateway URL can't bypass the login.
+11. **Verification** — the full HTTPS/auth/bypass-closure matrix re-checked end-to-end, plus (an
+    unplanned but real) investigation into a DHT11 sensor dropout discovered during this pass —
+    see §5.2.
+12. **Documentation** — this update.
 
 ### 2.2 AWS CLI commands applied
 
@@ -252,6 +280,94 @@ aws sqs get-queue-attributes --queue-url <url> \
   --region eu-central-1
 ```
 
+**Phase 8 — CloudFront + HTTPS, S3 goes private**
+
+```bash
+# Origin Access Control: lets CloudFront read the S3 bucket without the bucket being public.
+aws cloudfront create-origin-access-control --origin-access-control-config '{
+  "Name": "pico2w-telemetry-ui-oac", "SigningProtocol": "sigv4",
+  "SigningBehavior": "always", "OriginAccessControlOriginType": "s3"
+}'
+# -> returned OAC Id E1Y8E6E71UI0M8
+
+# Distribution: S3 (via the OAC) as the default origin, CachingDisabled while iterating,
+# HTTPS via CloudFront's own default certificate (no custom domain needed).
+aws cloudfront create-distribution \
+  --distribution-config file://aws_backend/cloudfront_distribution_config.json
+# -> returned distribution Id E1910G7OJTPGYC, domain d3nk6zxm1fgda3.cloudfront.net
+
+# Flip the bucket private: only this exact distribution ARN may read it (condition in the
+# policy), Block Public Access re-enabled, and static website hosting removed (CloudFront
+# now serves the page from the bucket's plain REST endpoint instead).
+aws s3api put-bucket-policy --bucket pico2w-telemetry-ui-596633517506 \
+  --policy file://aws_backend/iam/telemetry_ui_bucket_policy.json --region eu-central-1
+aws s3api put-public-access-block --bucket pico2w-telemetry-ui-596633517506 \
+  --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true \
+  --region eu-central-1
+aws s3api delete-bucket-website --bucket pico2w-telemetry-ui-596633517506 --region eu-central-1
+
+aws cloudfront wait distribution-deployed --id E1910G7OJTPGYC
+```
+
+**Phase 9 — password gate (CloudFront Function, HTTP Basic Auth)**
+
+```bash
+# Create the function (credential baked into the source - see §3 and §7 for why, and
+# aws_backend/cloudfront_basic_auth_function.js.example for the gitignored real file's shape).
+aws cloudfront create-function \
+  --name pico2w-telemetry-basic-auth \
+  --function-config '{"Comment":"HTTP Basic Auth gate","Runtime":"cloudfront-js-2.0"}' \
+  --function-code fileb://aws_backend/cloudfront_basic_auth_function.js \
+  --region us-east-1
+
+# Test against sample viewer-request events BEFORE going live: one with no Authorization
+# header (expect a 401 response object), one with the correct header (expect the request
+# passed through unchanged). Caught nothing wrong here, but worth doing before publishing.
+aws cloudfront test-function --name pico2w-telemetry-basic-auth --if-match <ETag> \
+  --event-object fileb://<test-event>.json --stage DEVELOPMENT --region us-east-1
+
+# Publish DEVELOPMENT -> LIVE.
+aws cloudfront publish-function --name pico2w-telemetry-basic-auth --if-match <ETag> \
+  --region us-east-1
+
+# Associate it with the distribution's default (S3) behavior, viewer-request event:
+# get the current config, add the FunctionAssociations entry, update-distribution with
+# --if-match set to the config's current ETag.
+aws cloudfront get-distribution-config --id E1910G7OJTPGYC --region us-east-1
+aws cloudfront update-distribution --id E1910G7OJTPGYC \
+  --distribution-config file://<modified-config>.json --if-match <ETag> --region us-east-1
+aws cloudfront wait distribution-deployed --id E1910G7OJTPGYC --region us-east-1
+```
+
+**Phase 10 — route the API through CloudFront too, and close the direct-bypass gap**
+
+```bash
+# A random shared secret that only CloudFront and the Lambda will know.
+openssl rand -hex 24
+
+# get_telemetry_lambda.py updated to 403 unless this exact header is present - see §4.3.
+# The secret itself is set as a Lambda environment variable, never hardcoded in the source.
+cd aws_backend && zip -q get_telemetry_lambda.zip get_telemetry_lambda.py
+aws lambda update-function-code --function-name pico2w-get-telemetry \
+  --zip-file fileb://get_telemetry_lambda.zip --region eu-central-1
+aws lambda update-function-configuration --function-name pico2w-get-telemetry \
+  --environment "Variables={ORIGIN_VERIFY_SECRET=<the-secret>}" --region eu-central-1
+
+# Add API Gateway as a second CloudFront origin (custom header carries the secret) and a
+# /telemetry* behavior targeting it, same Basic Auth function attached, CachingDisabled
+# (it's live data), Managed-AllViewerExceptHostHeader origin request policy (forwards query
+# strings/headers to the custom origin without conflicting with its own Host header).
+# Same get/modify/update-distribution --if-match cycle as Phase 9.
+aws cloudfront get-distribution-config --id E1910G7OJTPGYC --region us-east-1
+aws cloudfront update-distribution --id E1910G7OJTPGYC \
+  --distribution-config file://<modified-config>.json --if-match <ETag> --region us-east-1
+aws cloudfront wait distribution-deployed --id E1910G7OJTPGYC --region us-east-1
+
+# web_ui/index.html's default API endpoint updated to the CloudFront URL (same-origin now).
+aws s3 cp web_ui/index.html s3://pico2w-telemetry-ui-596633517506/index.html \
+  --content-type text/html --region eu-central-1
+```
+
 ---
 
 ## 3. Design decisions
@@ -278,10 +394,33 @@ partition automatically, with no Lambda redeploy.
 **API Gateway HTTP API (v2), not REST API (v1).** Cheaper, and CORS is a first-class
 declarative config on the API itself rather than something to wire up per-route/per-method.
 
-**S3 static website hosting, not CloudFront.** Simplest option for a single self-contained HTML
-file with no build step. Traded away: the site is served over plain `http://`, not `https://` —
-acceptable for a no-secrets read-only dashboard, but worth revisiting (front it with CloudFront)
-if this pattern is ever reused for something more sensitive.
+**S3 behind CloudFront + Origin Access Control, not plain S3 static website hosting.** The
+original Phase 4 implementation used the S3 website endpoint directly (simplest option, but
+`http://` only). Once HTTPS and password protection were requested (Phase 8), CloudFront became
+necessary anyway — and CloudFront's OAC mechanism is the standard way to front S3 *and* make the
+bucket private at the same time, so there's no plain-HTTP, no-login backdoor left sitting at the
+old S3 website URL.
+
+**HTTP Basic Auth via a CloudFront Function, not Cognito.** A real login system (Cognito user
+pool + CloudFront authorization) would be the "proper" answer for multiple users, password reset,
+or session management. This is a single-person hobby dashboard, so a shared username/password
+checked by a tiny edge function is proportionate: near-zero cost, minutes of setup, browser-native
+login UI. Traded away: the credential lives in the function's own source (see §7), not a secrets
+manager.
+
+**A shared-secret header, not an API Gateway resource policy, to lock the API to CloudFront-only.**
+HTTP APIs (API Gateway v2) don't support resource policies the way REST APIs (v1) do, so "only
+CloudFront may call this" can't be expressed declaratively on the API itself. CloudFront attaches
+a fixed custom header to its origin requests; `pico2w-get-telemetry` checks it and returns `403`
+otherwise. Simple, no extra infrastructure (no Lambda authorizer needed), but it is a static
+shared secret, not a rotated credential — acceptable here, not a pattern to copy for anything more
+sensitive.
+
+**One chart, dual Y-axis, category (not time-scale) X-axis.** Temperature and humidity share one
+`<canvas>` with independent left/right axes rather than two separate charts, since they're read
+together. A category axis (formatted time-of-day labels) was used instead of Chart.js's time
+scale to avoid pulling in a date-adapter library for what is, in practice, evenly-10s-spaced
+samples — a time scale would only matter if gaps in the data needed to be visually proportional.
 
 ---
 
@@ -328,32 +467,86 @@ a given `device_id` (query param, defaults to `pico2w-VZ-210726-freertos`), newe
   `DynamoDBQueryTelemetry` — `dynamodb:Query` scoped to just this table
   ([aws_backend/iam/get_telemetry_permissions_policy.json](aws_backend/iam/get_telemetry_permissions_policy.json)).
 - API Gateway HTTP API `Pico2wTelemetryApi` (`ApiId o4apfjc495`):
-  - CORS: `AllowOrigins=*`, `AllowMethods=GET`, `AllowHeaders=content-type`.
+  - CORS: `AllowOrigins=*`, `AllowMethods=GET`, `AllowHeaders=content-type` (now moot for the
+    CloudFront path, which is same-origin — see §4.7 — but left in place; harmless).
   - Route `GET /telemetry` → `AWS_PROXY` integration (payload format 2.0) → `pico2w-get-telemetry`.
   - Stage `$default`, auto-deploy.
   - Resource-based Lambda permission (`ApiGatewayInvokeGetTelemetry`) grants
     `apigateway.amazonaws.com` invoke rights, scoped by `SourceArn` to `<api-id>/*/*/telemetry`.
 
-**Live endpoint:** `https://o4apfjc495.execute-api.eu-central-1.amazonaws.com/telemetry`
+Direct endpoint (bypasses the password gate, but returns `403` since Phase 10 — see §4.8):
+`https://o4apfjc495.execute-api.eu-central-1.amazonaws.com/telemetry`
 
 ### 4.4 Web UI
 
 [web_ui/index.html](web_ui/index.html) — self-contained HTML/JS (no build step, no dependencies):
-editable API endpoint + row-limit fields, a Load button, a 10-second auto-refresh checkbox, and a
-table rendering `device_id`/`temperature_c`/`ambient_temp_c`/`humidity_pct`/`reading_ts` per row.
+editable API endpoint + row-limit fields, a Load button, a 10-second auto-refresh checkbox, a
+Chart.js line chart (§4.5), and a table rendering
+`device_id`/`temperature_c`/`ambient_temp_c`/`humidity_pct`/`reading_ts` per row (with the DHT
+error reason shown in place of a blank cell when a reading is missing — see §5.2).
 
-Hosted on S3 bucket `pico2w-telemetry-ui-596633517506` (`eu-central-1`):
-- Static website hosting enabled, `index.html` as the index document.
-- Public access block disabled and a bucket policy
+Originally hosted directly on an S3 static website endpoint (Phase 4); as of Phase 8 the bucket is
+private and only reachable through CloudFront (§4.6).
+
+### 4.5 Chart.js line graphs
+
+Chart.js 4.5.1 loaded via CDN (`cdnjs.cloudflare.com`), one line chart with points
+(`pointRadius: 3`) above the existing table: Temperature °C and Ambient °C on the left Y-axis,
+Humidity % on an independent right Y-axis, X-axis labeled with reading time. `load()` reverses the
+API's newest-first order into chronological order before updating the chart, so it reads
+left-to-right as time passing.
+
+### 4.6 CloudFront + HTTPS (S3 origin, private bucket)
+
+- Origin Access Control `pico2w-telemetry-ui-oac` (`E1Y8E6E71UI0M8`) — lets CloudFront read the S3
+  bucket without the bucket being public.
+- CloudFront distribution `E1910G7OJTPGYC` (domain `d3nk6zxm1fgda3.cloudfront.net`)
+  ([aws_backend/cloudfront_distribution_config.json](aws_backend/cloudfront_distribution_config.json)
+  — the base config used to create it; the live config now also carries the Phase 9/10 additions
+  applied via `update-distribution`, not reflected back into this file):
+  - Default behavior (`/*`): S3 origin via the OAC, `CachingDisabled`, `redirect-to-https`.
+  - HTTPS via CloudFront's own default certificate — no custom domain or ACM cert needed.
+- S3 bucket flipped private: Block Public Access re-enabled, static website hosting removed, and
+  the bucket policy
   ([aws_backend/iam/telemetry_ui_bucket_policy.json](aws_backend/iam/telemetry_ui_bucket_policy.json))
-  grants `s3:GetObject` on bucket objects only (no `ListBucket`, no write access) — public-read of
-  a page containing no secrets, just a public API URL.
+  now grants `s3:GetObject` only to `cloudfront.amazonaws.com`, conditioned on `AWS:SourceArn`
+  matching this exact distribution — no other distribution, account, or the public can read it.
 
-**Live dashboard:** http://pico2w-telemetry-ui-596633517506.s3-website.eu-central-1.amazonaws.com
+### 4.7 Password gate (CloudFront Function, HTTP Basic Auth)
+
+CloudFront Function `pico2w-telemetry-basic-auth`
+([aws_backend/cloudfront_basic_auth_function.js.example](aws_backend/cloudfront_basic_auth_function.js.example)
+— the real, credential-bearing file is gitignored, matching this project's existing
+`wifi_credentials.h`/`.h.example` pattern): on `viewer-request`, compares the `Authorization`
+header against a precomputed `"Basic " + base64(user:pass)` string; missing/wrong → `401` +
+`WWW-Authenticate: Basic`, which triggers the browser's native login popup. Tested via
+`aws cloudfront test-function` against both an unauthenticated and an authenticated sample event
+before publishing. Associated with **both** CloudFront behaviors (`/*` and `/telemetry*`), so one
+login covers the whole site.
+
+### 4.8 API routed through CloudFront, direct bypass closed
+
+- API Gateway added as a second CloudFront origin, with custom header `x-origin-verify: <secret>`
+  attached to its origin requests (the secret is a random 24-byte value, `openssl rand -hex 24`).
+- Behavior `/telemetry*`: that origin, `CachingDisabled` (live data), `Managed-AllViewerExceptHostHeader`
+  origin request policy (forwards query strings/headers without conflicting with the origin's own
+  Host header), same Basic Auth function as §4.7.
+- `get_telemetry_lambda.py` rejects (`403`) any request whose `x-origin-verify` header doesn't
+  match `ORIGIN_VERIFY_SECRET` — set as a Lambda environment variable, never hardcoded in the
+  committed source. This is what actually closes the bypass: without it, the raw API Gateway URL
+  would still serve data to anyone who found it, regardless of CloudFront's password gate.
+- `web_ui/index.html`'s default API endpoint updated to the CloudFront URL (`/telemetry`) — now
+  same-origin with the page, so CORS is no longer load-bearing and the browser's cached Basic Auth
+  credentials cover the chart/table's `fetch()` calls automatically.
+
+**Live dashboard (HTTPS, password-protected):** https://d3nk6zxm1fgda3.cloudfront.net/
+Login: see `aws_backend/cloudfront_basic_auth_function.js` (gitignored) or ask whoever set it.
 
 ---
 
 ## 5. Verification performed
+
+### 5.1 Core pipeline (Phases 1–6)
 
 - Simulated publish via `aws iot-data publish` to the telemetry topic → confirmed the item landed
   in DynamoDB with `device_id` correctly derived from the topic.
@@ -367,6 +560,54 @@ Hosted on S3 bucket `pico2w-telemetry-ui-596633517506` (`eu-central-1`):
 - Confirmed the existing SQS queue (`RaspiPiPico2w-telemetry-queue`) is still accumulating
   messages, unaffected by the new rule.
 - Opened the dashboard in an actual browser and confirmed it renders and updates correctly.
+
+### 5.2 DHT11 intermittent outage — investigation (Phases 7–11)
+
+While verifying Phases 7–11, the dashboard's Humidity/Ambient columns went blank — `temperature_c`
+kept arriving, but `ambient_temp_c`/`humidity_pct` were absent from the JSON entirely (confirmed
+directly in DynamoDB, not a rendering bug). Investigation, in order:
+
+1. **Code review for a software cause**: checked whether the recently-added PIR motion sensor
+   (`pir.c`/`pir_task.c`, added just before this outage) could be conflicting with the DHT11
+   driver. It doesn't — PIR uses GPIO14/13 via plain GPIO interrupts; DHT11 uses GPIO15 via
+   `pio1`/state-machine 0. No shared pin, no shared PIO block. The DHT driver's own error-recovery
+   logic (`dht_arm()` explicitly re-jumps the PIO program to its `entry` label on every read,
+   bounded timeouts, no mutex held across a failed read) also checked out — no bug found.
+2. **Ruled out this conversation's own changes as the cause**: the humidity data later recovered
+   on the device's *existing, unmodified* firmware — before any diagnostic code (see below) was
+   even written, and with no device connected to the machine this conversation runs on
+   (confirmed: no `/dev/ttyACM*` present throughout). A deterministic software bug doesn't
+   self-heal; a dead sensor doesn't either. That left an intermittent physical cause (most likely
+   a disturbed/marginal connector from the recent PIR wiring work, or transient power-rail noise)
+   as the working theory.
+3. **Physical fix**: the user reseated/fixed the wiring; humidity data resumed immediately and
+   stayed stable across repeated checks afterward.
+4. **Diagnostics added regardless** (`humiture_task.c`/`.h`, `aws_iot_task.c`): when a reading is
+   stale, the MQTT payload now includes `dht_err` (`"timeout"`/`"checksum"`/`"range"`/`"busy"`,
+   from the DHT driver's own status enum) and `dht_fail_count` instead of silently omitting the
+   fields. Both Lambdas updated to persist/pass these through, and the dashboard shows
+   `err: <reason>` in the Humidity cell instead of a blank `-` when it happens again. Compiled
+   successfully (`cmake --build build`) but **not yet flashed** — this conversation has no
+   debug-probe/USB access to the board. The distinction matters for next time: `timeout` repeatedly
+   means the sensor isn't responding at all (power/connector); `checksum` mixed with good reads
+   means a flaky/noisy line (loose contact, which matches what actually happened here); `range`
+   means a decode-level issue.
+
+### 5.3 HTTPS / password-protection matrix (Phase 11)
+
+| Check | Result |
+|---|---|
+| Dashboard page, no login | `401` |
+| Dashboard page, correct login | `200` |
+| `/telemetry` via CloudFront, no login | `401` |
+| `/telemetry` via CloudFront, correct login | `200` + fresh JSON |
+| Raw S3 bucket (direct) | `403` — private, OAC-only |
+| Raw API Gateway (direct, no secret header) | `403` — bypass closed |
+| Plain `http://` on the CloudFront domain | `301` → HTTPS |
+| Both Lambdas' CloudWatch Logs | 0 errors |
+| Chart.js CDN | `200` |
+| Existing SQS queue | still accumulating, unaffected |
+| Dashboard opened in a real browser | renders and updates correctly |
 
 Useful commands for future debugging:
 
@@ -383,8 +624,11 @@ aws logs filter-log-events --log-group-name /aws/lambda/pico2w-store-telemetry \
 aws logs filter-log-events --log-group-name /aws/lambda/pico2w-get-telemetry \
   --start-time $(( $(date +%s) - 300 ))000 --filter-pattern "ERROR" --region eu-central-1
 
-# Hit the API directly
-curl -s "https://o4apfjc495.execute-api.eu-central-1.amazonaws.com/telemetry?limit=5" | python3 -m json.tool
+# Hit the live dashboard's API through CloudFront (needs the login)
+curl -s -u "<user>:<pass>" "https://d3nk6zxm1fgda3.cloudfront.net/telemetry?limit=5" | python3 -m json.tool
+
+# Confirm the direct API Gateway URL is still closed (expect 403, no secret header sent)
+curl -s -o /dev/null -w "%{http_code}\n" "https://o4apfjc495.execute-api.eu-central-1.amazonaws.com/telemetry"
 ```
 
 ---
@@ -402,30 +646,63 @@ aws lambda update-function-code --function-name pico2w-get-telemetry \
   --zip-file fileb://get_telemetry_lambda.zip --region eu-central-1
 ```
 
-Updating `web_ui/index.html`:
+Updating `web_ui/index.html` (now behind CloudFront, not the old S3 website endpoint):
 
 ```bash
 aws s3 cp web_ui/index.html s3://pico2w-telemetry-ui-596633517506/index.html \
   --content-type text/html --region eu-central-1
 ```
 
+Changing the dashboard password: edit `EXPECTED_AUTH` in the gitignored
+`aws_backend/cloudfront_basic_auth_function.js` (regenerate the base64 with
+`printf '<user>:<pass>' | base64`), then:
+
+```bash
+aws cloudfront update-function --name pico2w-telemetry-basic-auth \
+  --function-code fileb://aws_backend/cloudfront_basic_auth_function.js \
+  --if-match <ETag-from-describe-function> --region us-east-1
+aws cloudfront publish-function --name pico2w-telemetry-basic-auth \
+  --if-match <ETag-from-the-update-above> --region us-east-1
+```
+
+Rotating the CloudFront↔API-Gateway shared secret: `openssl rand -hex 24`, then
+`aws lambda update-function-configuration ... --environment "Variables={ORIGIN_VERIFY_SECRET=<new>}"`
+and update the `CustomHeaders` value on the API Gateway origin in the distribution config
+(get-distribution-config → edit → update-distribution, as in §2.2 Phase 10).
+
+Flashing the DHT11 diagnostics firmware change (§5.2, compiled but not yet deployed to the
+board): `cmake --build build`, then flash via the Pico VS Code extension or `picotool` as usual
+(see [README.md](README.md)'s *Building and flashing* section) — needs the device connected over
+USB/debug-probe, which this conversation doesn't have.
+
 ---
 
 ## 7. Known tradeoffs / future work
 
-- **API Gateway endpoint is public with no auth or throttling** — matches the source project's
-  approach; acceptable since the data isn't sensitive, but a usage-plan throttle or API key would
-  be the natural next hardening step if this is ever exposed more broadly.
-- **S3 website is plain `http://`, not `https://`** — no CloudFront/ACM certificate in front of it.
-  Fine for a no-secrets dashboard; revisit if reused for anything sensitive.
-- **CORS is wide open (`AllowOrigins: *`)** — acceptable since the API is read-only and unauth'd
-  anyway; scoping it to the exact S3 website origin would be a minor tightening.
+- **The Basic Auth credential lives in the CloudFront Function's own source**, readable by anyone
+  with CloudFront console/CLI access to this AWS account — not a secrets-manager-grade credential,
+  fine for keeping casual visitors out of a hobby dashboard. See §3 for why this was chosen over
+  Cognito.
+- **The CloudFront↔API-Gateway header is a static shared secret**, not a rotated credential or a
+  signed request. Sufficient to close the "find the raw URL" bypass; not a substitute for a real
+  authorizer if this pattern is ever reused for something sensitive.
+- **Single shared login, no per-user accounts, sessions, or audit trail** — proportionate for one
+  person's hobby dashboard; would need Cognito (or similar) to go further.
+- **API Gateway's CORS is still wide open (`AllowOrigins: *`)** from Phase 3, now effectively
+  unused (the CloudFront path is same-origin) but left in place since it's harmless and the raw
+  API Gateway URL is already blocked at the Lambda layer (§4.8) regardless of CORS.
+- **CloudFront's own default domain (`*.cloudfront.net`), no custom domain** — chosen for zero
+  extra setup; a branded domain would need a Route 53 hosted zone (or equivalent DNS) and an ACM
+  certificate.
 - **Single-device assumption in the UI's default state** — `GetTelemetry` defaults to
   `pico2w-VZ-210726-freertos` but accepts a `device_id` query param override, so multi-device
   support already works at the API level; the HTML UI itself has no device picker yet.
 - **No TTL / retention policy on DynamoDB** — the table will grow unbounded at ~1 item/10s
   (~260k items/month). Cheap at this scale (on-demand pricing, small items), but a DynamoDB TTL
   attribute would be a simple way to auto-expire old readings if this runs for a long time.
+- **DHT11 diagnostic fields (`dht_err`/`dht_fail_count`) are implemented end-to-end but not yet
+  flashed to the device** (§5.2) — the backend/UI will display them as soon as the firmware is
+  reflashed; until then, a stale reading still just shows a blank cell with no reason.
 
 ---
 
@@ -440,18 +717,24 @@ aws s3 cp web_ui/index.html s3://pico2w-telemetry-ui-596633517506/index.html \
 | Read Lambda | `pico2w-get-telemetry` |
 | Read Lambda role | `Pico2wGetTelemetryLambdaRole` |
 | API Gateway | `Pico2wTelemetryApi` (`o4apfjc495`) |
-| API endpoint | `https://o4apfjc495.execute-api.eu-central-1.amazonaws.com/telemetry` |
-| S3 bucket | `pico2w-telemetry-ui-596633517506` |
-| Dashboard URL | `http://pico2w-telemetry-ui-596633517506.s3-website.eu-central-1.amazonaws.com` |
+| API Gateway direct URL (blocked, §4.8) | `https://o4apfjc495.execute-api.eu-central-1.amazonaws.com/telemetry` |
+| S3 bucket (private, CloudFront-only) | `pico2w-telemetry-ui-596633517506` |
+| Origin Access Control | `pico2w-telemetry-ui-oac` (`E1Y8E6E71UI0M8`) |
+| CloudFront distribution | `E1910G7OJTPGYC` (`d3nk6zxm1fgda3.cloudfront.net`) |
+| CloudFront Function (Basic Auth) | `pico2w-telemetry-basic-auth` |
+| **Live dashboard (HTTPS, password-protected)** | `https://d3nk6zxm1fgda3.cloudfront.net/` |
 | Existing SQS queue (unchanged) | `RaspiPiPico2w-telemetry-queue` |
 
 | File | Role |
 |---|---|
 | `aws_backend/store_telemetry_lambda.py` | Write-path Lambda source |
-| `aws_backend/get_telemetry_lambda.py` | Read-path Lambda source |
+| `aws_backend/get_telemetry_lambda.py` | Read-path Lambda source (origin-verify check, §4.8) |
 | `aws_backend/iot_store_telemetry_rule.json` | IoT Rule definition (SQL + Lambda action) |
-| `aws_backend/iam/*.json` | IAM trust/permissions policies + S3 bucket policy |
-| `web_ui/index.html` | Static dashboard, deployed to S3 |
+| `aws_backend/iam/*.json` | IAM trust/permissions policies + S3 bucket policy (CloudFront-only, §4.6) |
+| `aws_backend/cloudfront_distribution_config.json` | Base CloudFront distribution config (Phase 8) |
+| `aws_backend/cloudfront_basic_auth_function.js.example` | Basic Auth function template (committed) |
+| `aws_backend/cloudfront_basic_auth_function.js` | Real function source with credential (gitignored) |
+| `web_ui/index.html` | Dashboard (table + Chart.js), deployed to S3, served via CloudFront |
 
 ---
 
@@ -574,3 +857,44 @@ out of SQS; consuming a message removes it once acknowledged).
 organized into one **log group** per Lambda function (e.g. `/aws/lambda/pico2w-store-telemetry`).
 Used throughout this project's verification steps (`aws logs filter-log-events`,
 `aws logs tail`) to confirm each Lambda ran without errors.
+
+**CloudFront** — AWS's content delivery network (CDN): a global network of edge locations that
+cache/proxy requests to an **origin** (S3, API Gateway, or an arbitrary HTTP server), with HTTPS,
+custom domains, and edge compute built in. Used here as a single distribution (`E1910G7OJTPGYC`)
+in front of both the S3-hosted dashboard and the API Gateway endpoint, so both get one HTTPS
+domain and one password gate instead of being separately exposed.
+
+- **Distribution** — the CloudFront resource itself: a set of **origins** and **behaviors**
+  (routing rules) under one domain. Propagating a config change to all of CloudFront's edge
+  locations takes several minutes (`aws cloudfront wait distribution-deployed`), unlike most AWS
+  API calls which take effect immediately.
+- **Origin** — a backend CloudFront fetches from on a cache miss. Used here twice: the S3 bucket
+  (via OAC) and API Gateway (as a "custom origin," since it's an arbitrary HTTPS endpoint, not S3).
+- **Behavior** — a path-pattern-to-origin mapping, plus its own cache policy, origin request
+  policy, and function associations. Used here as the default (`/*` → S3) and `/telemetry*` →
+  API Gateway) behaviors, each independently configured but sharing the same Basic Auth function.
+- **Origin Access Control (OAC)** — the mechanism that lets CloudFront fetch from a *private* S3
+  bucket: CloudFront signs its requests to S3 (SigV4), and the bucket's policy trusts only this
+  specific distribution's ARN. This is what makes it possible to have S3 be both the dashboard's
+  storage *and* fully private at the same time — no public bucket, no public website endpoint.
+- **CloudFront Function** — a tiny JavaScript function (a restricted subset of the language, no
+  network/filesystem access) that runs at the edge on every request, before CloudFront even checks
+  its cache. Used here (`pico2w-telemetry-basic-auth`) to implement the password gate: it inspects
+  the `Authorization` header and can short-circuit the request with a `401` before it ever reaches
+  S3 or API Gateway. Far lighter-weight than **Lambda@Edge** (CloudFront's other edge-compute
+  option, which runs full Lambda functions and supports more but costs more and is slower to
+  propagate) — a CloudFront Function was sufficient for a stateless header check like this.
+- **Origin request policy** — controls which parts of the viewer's original request (headers,
+  query strings, cookies) CloudFront forwards on to the origin. Used here
+  (`Managed-AllViewerExceptHostHeader`) on the `/telemetry*` behavior so `limit`/`device_id` query
+  strings reach the Lambda, without forwarding the viewer's original `Host` header, which would
+  conflict with API Gateway's own expectations for that header.
+
+**HTTP Basic Auth** — the oldest, simplest HTTP authentication scheme: the client sends
+`Authorization: Basic <base64(username:password)>` on every request, and the server returns `401`
+with a `WWW-Authenticate: Basic` header to prompt for credentials (browsers show this as a native
+login popup, not a styled page). No sessions, no cookies, no tokens — the browser just resends the
+same header on every subsequent request to that origin once entered, which is also why the
+dashboard's `fetch()` calls to `/telemetry` don't need a separate login (§4.8). Weaker than a real
+login system (the "password" is base64, not encrypted, so this is only meaningfully secure over
+HTTPS — which CloudFront provides), but proportionate for gating a single-person hobby dashboard.

@@ -3,12 +3,14 @@
 <head>
 <meta charset="utf-8">
 <title>Pico 2 W Telemetry</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.1/chart.umd.min.js"></script>
 <style>
   body { font-family: system-ui, sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem; }
   h1 { font-size: 1.3rem; }
   .controls { display: flex; gap: .75rem; align-items: end; margin-bottom: 1rem; flex-wrap: wrap; }
   label { display: block; font-size: .8rem; color: #555; }
   input, button { padding: .4rem .6rem; font: inherit; }
+  .chart-box { position: relative; height: 22rem; margin-bottom: 1.5rem; }
   table { border-collapse: collapse; width: 100%; }
   th, td { padding: .4rem .6rem; text-align: right; border-bottom: 1px solid #ddd; }
   th:nth-child(2), td:nth-child(2), th:last-child, td:last-child { text-align: left; }
@@ -24,7 +26,7 @@
   <div>
     <label for="url">API endpoint</label>
     <input id="url" size="64"
-        value="https://o4apfjc495.execute-api.eu-central-1.amazonaws.com/telemetry">
+        value="https://d3nk6zxm1fgda3.cloudfront.net/telemetry">
   </div>
   <div>
     <label for="limit">Limit</label>
@@ -35,6 +37,11 @@
 </div>
 
 <div id="status"></div>
+
+<div class="chart-box">
+  <canvas id="chart"></canvas>
+</div>
+
 <table>
   <thead><tr><th>#</th><th>Device</th><th>Temp &deg;C</th><th>Ambient &deg;C</th><th>Humidity %</th><th>Reading time</th></tr></thead>
   <tbody id="rows"></tbody>
@@ -43,6 +50,52 @@
 <script>
 const $ = id => document.getElementById(id);
 let timer = null;
+
+const chart = new Chart($('chart'), {
+  type: 'line',
+  data: {
+    labels: [],
+    datasets: [
+      {
+        label: 'Temperature °C',
+        data: [],
+        borderColor: '#c0392b',
+        backgroundColor: '#c0392b',
+        pointRadius: 3,
+        yAxisID: 'y',
+      },
+      {
+        label: 'Ambient °C',
+        data: [],
+        borderColor: '#e67e22',
+        backgroundColor: '#e67e22',
+        pointRadius: 3,
+        yAxisID: 'y',
+      },
+      {
+        label: 'Humidity %',
+        data: [],
+        borderColor: '#2980b9',
+        backgroundColor: '#2980b9',
+        pointRadius: 3,
+        yAxisID: 'y1',
+      },
+    ],
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false },
+    scales: {
+      y: { position: 'left', title: { display: true, text: 'Temperature °C' } },
+      y1: {
+        position: 'right',
+        title: { display: true, text: 'Humidity %' },
+        grid: { drawOnChartArea: false },
+      },
+    },
+  },
+});
 
 async function load() {
   const url = new URL($('url').value);
@@ -61,9 +114,17 @@ async function load() {
         <td>${r.device_id}</td>
         <td>${r.temperature_c?.toFixed(2) ?? '-'}</td>
         <td>${r.ambient_temp_c?.toFixed(2) ?? '-'}</td>
-        <td>${r.humidity_pct?.toFixed(1) ?? '-'}</td>
+        <td>${r.humidity_pct?.toFixed(1) ?? (r.dht_err ? `err: ${r.dht_err}` : '-')}</td>
         <td>${new Date(r.reading_ts).toLocaleString()}</td>
       </tr>`).join('');
+
+    // The API returns newest-first; the chart reads left-to-right chronologically.
+    const chronological = [...data.readings].reverse();
+    chart.data.labels = chronological.map(r => new Date(r.reading_ts).toLocaleTimeString());
+    chart.data.datasets[0].data = chronological.map(r => r.temperature_c ?? null);
+    chart.data.datasets[1].data = chronological.map(r => r.ambient_temp_c ?? null);
+    chart.data.datasets[2].data = chronological.map(r => r.humidity_pct ?? null);
+    chart.update();
 
     $('status').textContent =
       `${data.count} readings · updated ${new Date().toLocaleTimeString()}`;

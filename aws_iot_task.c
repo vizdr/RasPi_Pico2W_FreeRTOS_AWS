@@ -163,12 +163,14 @@ void aws_iot_task(__unused void *params) {
 
         // Publish periodically for as long as the connection holds.
         while (mqtt_client_is_connected(client)) {
-            char payload[96];
+            char payload[192];
             int len;
 
             // temperature_c stays the RP2350's own die reading (temp_task) for backward
             // compatibility; ambient_temp_c/humidity_pct are the DHT11's actual room
-            // readings, added only when humiture_task has a non-stale sample.
+            // readings, added only when humiture_task has a non-stale sample. When they're
+            // missing, dht_err/dht_fail_count say why, instead of silently vanishing -
+            // see humiture_get_diag().
             dht_reading_t dht;
             if (humiture_get_latest(&dht, NULL)) {
                 len = snprintf(payload, sizeof(payload),
@@ -177,8 +179,14 @@ void aws_iot_task(__unused void *params) {
                                 (double)dht_temperature_c(&dht),
                                 (double)dht_humidity_pct(&dht));
             } else {
-                len = snprintf(payload, sizeof(payload), "{\"temperature_c\":%.2f}",
-                                (double)temp_task_get_last_celsius());
+                dht_status_t dht_err;
+                uint32_t dht_fail_count;
+                humiture_get_diag(&dht_err, &dht_fail_count);
+                len = snprintf(payload, sizeof(payload),
+                                "{\"temperature_c\":%.2f,\"dht_err\":\"%s\",\"dht_fail_count\":%lu}",
+                                (double)temp_task_get_last_celsius(),
+                                dht_status_str(dht_err),
+                                (unsigned long)dht_fail_count);
             }
 
             cyw43_arch_lwip_begin();
