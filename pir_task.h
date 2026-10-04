@@ -28,5 +28,9 @@ void pir_task_set_retrigger(bool retriggerable);
 
 // Weak hooks, called from the pir task (not the ISR) - override to act on motion.
 // Keep them short and non-blocking: post to a queue and return.
-void pir_on_motion_start(void);
-void pir_on_motion_stop(uint32_t duration_ms);
+// time_ms is when the edge happened (ms since boot, sampled in the ISR - 32-bit, wraps
+// after 49.7 days); duration_ms is the length of the motion that just ended. When a
+// hook runs, pir_get_status() already reflects the new state, and its motion_count is
+// shared by a start and its stop.
+void pir_on_motion_start(uint32_t time_ms);
+void pir_on_motion_stop(uint32_t time_ms, uint32_t duration_ms);

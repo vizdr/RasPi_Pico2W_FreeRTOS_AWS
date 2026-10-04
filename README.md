@@ -110,6 +110,10 @@ is in [AWS-RasPi_PicoW2.md](AWS-RasPi_PicoW2.md).
 | `dht.c/h`, `dht.pio` | PIO-based DHT11/DHT22 single-wire driver |
 | `pir_task.c/h` | FreeRTOS task wrapping the PIR driver: motion start/stop hooks, `pir_get_status()` |
 | `pir.c/h` | PIR motion sensor driver: pins, trigger mode, GPIO edge ISR (no FreeRTOS) |
+| `lan_mqtt_task.c/h` | PIR events, state and online status to the Mosquitto broker on the Raspberry Pi 4B (plain MQTT on the LAN); see [PIR-MQTT-VMS-Pico.md](PIR-MQTT-VMS-Pico.md) |
+| `lan_mqtt_config.h`* / `.h.example` | LAN broker address, user and password (`.h` gitignored) |
+| `boot_time.h`, `tests/boot_time_test.c` | 64-bit `boot_ms` from the 32-bit edge timestamps, and its host-side test |
+| `watchdog_task.c/h` | Hardware-watchdog supervisor: resets after 4 min without Wi‑Fi or when a monitored task stops checking in; reports the reason after the reboot |
 | `sensor_task.c/h` | I2C MPU6050 example (independent of the AWS IoT path) |
 | `aws_backend/` | Cloud-side telemetry backend: Lambda sources, IAM/bucket policies, IoT Rule, CloudFront distribution config (see [AWS-Telemetry-WebUI.md](AWS-Telemetry-WebUI.md)) |
 | `web_ui/index.html` | Browser dashboard (table + Chart.js line graph), deployed to S3, served via CloudFront (HTTPS + password gate) |

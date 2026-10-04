@@ -6,7 +6,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
-#define TEMP_POLL_MS 1000
+#define TEMP_POLL_MS 2500
 #define ADC_VOLTAGE_REF 3.3f
 #define ADC_MAX_VALUE   4096.0f // 12-bit ADC: 2^12 distinct readings
 

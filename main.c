@@ -16,6 +16,8 @@
 #include "wifi_task.h"
 #include "humiture_task.h"
 #include "pir_task.h"
+#include "lan_mqtt_task.h"
+#include "watchdog_task.h"
 
 void vApplicationMallocFailedHook(void) {
     panic("malloc failed");
@@ -61,6 +63,12 @@ int main(void) {
     humiture_task_start(tskIDLE_PRIORITY + 1);   /* low priority; it only sleeps */
     // One above the others so motion start/stop is handled promptly after its ISR fires.
     pir_task_start(tskIDLE_PRIORITY + 2);
+    // PIR events to the Pi's MQTT broker on the LAN (PIR-MQTT-VMS-Pico.md); same level as
+    // the pir task so a motion edge is forwarded without waiting behind the AWS/TLS work.
+    lan_mqtt_task_start(tskIDLE_PRIORITY + 2);
+    // Above every application task so a busy one can't starve the feeding, below the CYW43
+    // worker (+4). Resets after 4 min without Wi-Fi or on a hung task (watchdog_task.h, D14).
+    watchdog_task_start(tskIDLE_PRIORITY + 3);
 
 
     vTaskStartScheduler();

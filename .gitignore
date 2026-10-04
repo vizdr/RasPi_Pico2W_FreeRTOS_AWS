@@ -4,6 +4,7 @@ build
 # secrets: never commit these
 certs/
 wifi_credentials.h
+lan_mqtt_config.h
 aws_credentials.c
 aws_backend/cloudfront_basic_auth_function.js
 

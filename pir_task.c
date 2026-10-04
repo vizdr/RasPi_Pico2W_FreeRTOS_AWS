@@ -15,6 +15,7 @@
 
 #include "pir_task.h"
 #include "pir.h"
+#include "watchdog_task.h"
 
 #include "FreeRTOS.h"
 #include "task.h"
@@ -55,13 +56,15 @@ static volatile bool     s_ready;
 static volatile uint32_t s_queue_overflows;
 
 __attribute__((weak))
-void pir_on_motion_start(void)
+void pir_on_motion_start(uint32_t time_ms)
 {
+    (void)time_ms;
 }
 
 __attribute__((weak))
-void pir_on_motion_stop(uint32_t duration_ms)
+void pir_on_motion_stop(uint32_t time_ms, uint32_t duration_ms)
 {
+    (void)time_ms;
     (void)duration_ms;
 }
 
@@ -120,10 +123,10 @@ static void pir_apply(bool level, uint32_t time_ms)
 
     if (level) {
         printf("[pir] motion start (#%lu)\n", (unsigned long)s_status.motion_count);
-        pir_on_motion_start();
+        pir_on_motion_start(time_ms);
     } else {
         printf("[pir] motion stop after %lu ms\n", (unsigned long)duration_ms);
-        pir_on_motion_stop(duration_ms);
+        pir_on_motion_stop(time_ms, duration_ms);
     }
 }
 
@@ -146,6 +149,8 @@ static void pir_task(void *arg)
     uint32_t reported_overflows = 0;
 
     for (;;) {
+        watchdog_checkin(WATCHDOG_CLIENT_PIR);   /* monitored from here, after warm-up */
+
         pir_event_t ev;
         if (xQueueReceive(s_queue, &ev, pdMS_TO_TICKS(PIR_RESYNC_MS)) == pdTRUE) {
             pir_apply(ev.level, ev.time_ms);

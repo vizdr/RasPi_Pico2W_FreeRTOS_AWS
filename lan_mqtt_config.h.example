@@ -1,0 +1,20 @@
+#pragma once
+
+// Copy this file to lan_mqtt_config.h (which is gitignored) and fill in the broker
+// password. lan_mqtt_config.h is never committed.
+//
+// The broker is Mosquitto on the Raspberry Pi 4B; its setup, users and ACL are in the VMS
+// repository (PIR-MQTT-VMS-PI4.md, Appendix B). The address is compiled in, so the Pi
+// needs a fixed IPv4 address on the router (PIR-MQTT-VMS-Pico.md §3.1).
+
+#define LAN_MQTT_BROKER_IP   "192.168.178.53"
+#define LAN_MQTT_PORT        1883
+#define LAN_MQTT_USER        "pico"
+#define LAN_MQTT_PASSWORD    "your-pico-broker-password"
+
+// Must be unique on the broker: a second client with the same id disconnects the first.
+#define LAN_MQTT_CLIENT_ID   "pico2w-01"
+
+// The ACL lets user "pico" write only below this prefix - a publish outside it is dropped
+// by the broker silently.
+#define LAN_MQTT_TOPIC_BASE  "home/pico2w-01"

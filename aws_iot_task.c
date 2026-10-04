@@ -54,10 +54,14 @@ static void dns_found_cb(__unused const char *name, const ip_addr_t *ipaddr, __u
     xEventGroupSetBits(s_dns_event_group, DNS_RESOLVED_BIT);
 }
 
-// Re-resolved on every (re)connect attempt rather than cached once, in case AWS ever
-// changes the IP behind the endpoint hostname.
+// Re-resolved on every (re)connect attempt rather than cached once: AWS does move the
+// endpoint between address ranges (VMS FoundAndFixed #54 found it at 63.179.34.254, outside
+// every range listed before).
 static bool resolve_endpoint(ip_addr_t *out) {
     xEventGroupClearBits(s_dns_event_group, DNS_RESOLVED_BIT);
+    // Reset before every lookup: a lookup that times out must not reuse the previous one's
+    // success and connect to its - possibly stale - address.
+    s_dns_ok = false;
 
     cyw43_arch_lwip_begin();
     err_t err = dns_gethostbyname(AWS_IOT_ENDPOINT, out, dns_found_cb, NULL);
@@ -71,9 +75,9 @@ static bool resolve_endpoint(ip_addr_t *out) {
         return false;
     }
 
-    xEventGroupWaitBits(s_dns_event_group, DNS_RESOLVED_BIT, pdTRUE, pdTRUE,
-                         pdMS_TO_TICKS(DNS_RESOLVE_WAIT_MS));
-    if (s_dns_ok) {
+    EventBits_t bits = xEventGroupWaitBits(s_dns_event_group, DNS_RESOLVED_BIT, pdTRUE, pdTRUE,
+                                           pdMS_TO_TICKS(DNS_RESOLVE_WAIT_MS));
+    if ((bits & DNS_RESOLVED_BIT) && s_dns_ok) {
         *out = s_resolved_ip;
         return true;
     }

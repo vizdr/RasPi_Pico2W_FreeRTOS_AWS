@@ -27,13 +27,26 @@
 // all of those running concurrently (Phase 4/5), the default pool was exhausted with a
 // hard panic ("MEMP_SYS_TIMEOUT is empty") right as the MQTT/TLS connection added its
 // own timer on top of what WiFi/DHCP/SNTP already had running.
-#define MEMP_NUM_SYS_TIMEOUT        16
+// +2 for lan_mqtt_task's second MQTT client, whose cyclic timer is one more sys_timeout()
+// alongside the AWS client's.
+#define MEMP_NUM_SYS_TIMEOUT        18
 
 #define LWIP_SOCKET                 0
 #define LWIP_NETCONN                0
 #define MEM_LIBC_MALLOC             0 // incompatible with non-polling (sys/FreeRTOS) archs
 #define MEM_ALIGNMENT               4
-#define MEM_SIZE                    4000
+// lwIP's own heap. Each mqtt_client_new() takes ~0.6 KB of it (rx buffer, request list,
+// MQTT_OUTPUT_RINGBUF_SIZE output ring), and there are two clients (AWS + LAN broker) on
+// top of TCP's outgoing data.
+#define MEM_SIZE                    16000
+// lwIP MQTT default is 256 bytes, shared by everything a client has queued but not yet
+// handed to TCP; a PIR event (~150 B framed) next to a retained pir/state publish would
+// otherwise return ERR_MEM routinely.
+#define MQTT_OUTPUT_RINGBUF_SIZE    512
+// Requests awaiting their PUBACK/SUBACK, per client. lan_mqtt_task keeps up to 4 events in
+// flight plus a retained pir/state and status; the lwIP default of 4 would cap that at
+// fewer and turn the surplus into ERR_MEM retries.
+#define MQTT_REQ_MAX_IN_FLIGHT      8
 #define MEMP_NUM_TCP_SEG            32
 #define MEMP_NUM_ARP_QUEUE          10
 #define PBUF_POOL_SIZE              24

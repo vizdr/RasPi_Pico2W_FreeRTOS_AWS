@@ -56,6 +56,8 @@ add_executable(blink_freertos
     humiture_task.c
     pir.c
     pir_task.c
+    lan_mqtt_task.c
+    watchdog_task.c
     )
 
 # Generate PIO header for dht.pio (must come after add_executable: it calls
@@ -78,6 +80,7 @@ target_link_libraries(blink_freertos
     pico_lwip_sntp
     hardware_pio
     hardware_clocks
+    hardware_watchdog
     )
 
 if (PICO_CYW43_SUPPORTED)
