@@ -3,10 +3,10 @@ build
 
 # secrets: never commit these
 certs/
-wifi_credentials.h
-lan_mqtt_config.h
-aws_credentials.c
-aws_backend/cloudfront_basic_auth_function.js
+config/wifi_credentials.h
+config/lan_mqtt_config.h
+config/aws_credentials.c
+cloud/aws_backend/cloudfront_basic_auth_function.js
 
-# Lambda deployment artifacts (rebuild with: cd aws_backend && zip -q *.zip *.py)
-aws_backend/*.zip
+# Lambda deployment artifacts (rebuild with: cd cloud/aws_backend && zip -q *.zip *.py)
+cloud/aws_backend/*.zip

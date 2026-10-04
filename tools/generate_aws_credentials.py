@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Regenerates aws_credentials.c (gitignored) from the PEM files in certs/.
+"""Regenerates config/aws_credentials.c (gitignored) from the PEM files in certs/.
 
-Run this again whenever you rotate the AWS IoT certificate/key:
-    python3 generate_aws_credentials.py
+Run this again whenever you rotate the AWS IoT certificate/key, from anywhere:
+    python3 tools/generate_aws_credentials.py
 """
 
 # Where the null-terminator rule below (see c_array()) comes from - straight from mbedtls's
@@ -27,9 +27,9 @@ Run this again whenever you rotate the AWS IoT certificate/key:
 
 import pathlib
 
-SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
-CERTS_DIR = SCRIPT_DIR / "certs"
-OUT_C = SCRIPT_DIR / "aws_credentials.c"
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
+CERTS_DIR = PROJECT_ROOT / "certs"
+OUT_C = PROJECT_ROOT / "config" / "aws_credentials.c"
 
 FILES = [
     ("aws_root_ca_pem", CERTS_DIR / "AmazonRootCA1.pem"),

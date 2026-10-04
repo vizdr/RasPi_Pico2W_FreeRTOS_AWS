@@ -44,28 +44,33 @@ include(FreeRTOS_Kernel_import.cmake)
 # Add executable. Default name is the project name, version 0.1
 
 add_executable(blink_freertos
-    main.c
-    aws_credentials.c
-    aws_iot_task.c
-    led.c
-    sensor_task.c
-    temp_task.c
-    time_task.c
-    wifi_task.c
-    dht.c
-    humiture_task.c
-    pir.c
-    pir_task.c
-    lan_mqtt_task.c
-    watchdog_task.c
+    src/main.c
+    src/aws_iot_task.c
+    src/led.c
+    src/sensor_task.c
+    src/temp_task.c
+    src/time_task.c
+    src/wifi_task.c
+    src/humiture_task.c
+    src/pir_task.c
+    src/lan_mqtt_task.c
+    src/watchdog_task.c
+    drivers/dht.c
+    drivers/pir.c
+    config/aws_credentials.c
     )
 
 # Generate PIO header for dht.pio (must come after add_executable: it calls
 # add_dependencies()/get_target_property() on the target, which must already exist)
-pico_generate_pio_header(blink_freertos ${CMAKE_CURRENT_LIST_DIR}/dht.pio)
+pico_generate_pio_header(blink_freertos ${CMAKE_CURRENT_LIST_DIR}/drivers/dht.pio)
 
+# Quoted includes resolve against these, so sources need no path prefixes.
+# config/ must be here: the SDK looks up FreeRTOSConfig.h, lwipopts.h and
+# mbedtls_config.h on the include path of whichever target links them.
 target_include_directories(blink_freertos PRIVATE
-    ${CMAKE_CURRENT_LIST_DIR}
+    ${CMAKE_CURRENT_LIST_DIR}/src
+    ${CMAKE_CURRENT_LIST_DIR}/drivers
+    ${CMAKE_CURRENT_LIST_DIR}/config
     )
 
 # pull in common dependencies

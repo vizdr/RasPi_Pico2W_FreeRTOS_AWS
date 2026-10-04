@@ -76,7 +76,7 @@ touches firmware or the existing SQS rule):
 5. **Verification** — real device powered on, readings cross-checked between DynamoDB and the API
    response, CloudWatch Logs checked for errors, CORS confirmed against the actual site origin, the
    pre-existing SQS path confirmed still unaffected, and the dashboard opened in a real browser.
-6. **Documentation** — this file, plus the [README.md](README.md) updates.
+6. **Documentation** — this file, plus the [README.md](../README.md) updates.
 
 Phases 7–12 (added afterward, same dependency-order principle): HTTPS and password protection for
 the dashboard, requested once the core pipeline was already working end-to-end.
@@ -140,7 +140,7 @@ aws dynamodb wait table-exists --table-name Pico2wTelemetry --region eu-central-
 ```bash
 # Execution role, trusted by the Lambda service.
 aws iam create-role --role-name Pico2wStoreTelemetryLambdaRole \
-  --assume-role-policy-document file://aws_backend/iam/store_telemetry_trust_policy.json
+  --assume-role-policy-document file://cloud/aws_backend/iam/store_telemetry_trust_policy.json
 
 # Standard managed policy: CloudWatch Logs write access.
 aws iam attach-role-policy --role-name Pico2wStoreTelemetryLambdaRole \
@@ -149,10 +149,10 @@ aws iam attach-role-policy --role-name Pico2wStoreTelemetryLambdaRole \
 # Inline policy: dynamodb:PutItem, scoped to just this one table.
 aws iam put-role-policy --role-name Pico2wStoreTelemetryLambdaRole \
   --policy-name DynamoDBPutTelemetry \
-  --policy-document file://aws_backend/iam/store_telemetry_permissions_policy.json
+  --policy-document file://cloud/aws_backend/iam/store_telemetry_permissions_policy.json
 
 # Package the Lambda source into a deployable zip.
-cd aws_backend && zip -q store_telemetry_lambda.zip store_telemetry_lambda.py
+cd cloud/aws_backend && zip -q store_telemetry_lambda.zip store_telemetry_lambda.py
 
 # Deploy the write-path Lambda. (Retried a few times a few seconds apart on first run —
 # a just-created IAM role isn't always immediately assumable by Lambda.)
@@ -167,7 +167,7 @@ aws lambda create-function \
 # New IoT Rule (leaves the existing SQS rule untouched): SQL adds device_id from the topic.
 aws iot create-topic-rule \
   --rule-name Pico2wStoreTelemetryRule \
-  --topic-rule-payload file://aws_backend/iot_store_telemetry_rule.json \
+  --topic-rule-payload file://cloud/aws_backend/iot_store_telemetry_rule.json \
   --region eu-central-1
 
 # Resource-based permission: only this specific rule may invoke this Lambda.
@@ -192,14 +192,14 @@ aws iot-data publish \
 ```bash
 # Execution role (reuses the same generic Lambda trust policy from Phase 2).
 aws iam create-role --role-name Pico2wGetTelemetryLambdaRole \
-  --assume-role-policy-document file://aws_backend/iam/store_telemetry_trust_policy.json
+  --assume-role-policy-document file://cloud/aws_backend/iam/store_telemetry_trust_policy.json
 
 # CloudWatch Logs + an inline policy for dynamodb:Query, scoped to just this table.
 aws iam attach-role-policy --role-name Pico2wGetTelemetryLambdaRole \
   --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
 aws iam put-role-policy --role-name Pico2wGetTelemetryLambdaRole \
   --policy-name DynamoDBQueryTelemetry \
-  --policy-document file://aws_backend/iam/get_telemetry_permissions_policy.json
+  --policy-document file://cloud/aws_backend/iam/get_telemetry_permissions_policy.json
 
 # Package and deploy the read-path Lambda.
 zip -q get_telemetry_lambda.zip get_telemetry_lambda.py
@@ -262,7 +262,7 @@ aws s3api put-public-access-block \
 # Public s3:GetObject on bucket objects only (no ListBucket, no write access).
 aws s3api put-bucket-policy \
   --bucket pico2w-telemetry-ui-596633517506 \
-  --policy file://aws_backend/iam/telemetry_ui_bucket_policy.json \
+  --policy file://cloud/aws_backend/iam/telemetry_ui_bucket_policy.json \
   --region eu-central-1
 
 # Turns the bucket into a static website endpoint, index.html as the default document.
@@ -272,7 +272,7 @@ aws s3api put-bucket-website \
   --region eu-central-1
 
 # Publish the dashboard page itself.
-aws s3 cp web_ui/index.html s3://pico2w-telemetry-ui-596633517506/index.html \
+aws s3 cp cloud/web_ui/index.html s3://pico2w-telemetry-ui-596633517506/index.html \
   --content-type text/html --region eu-central-1
 ```
 
@@ -312,14 +312,14 @@ aws cloudfront create-origin-access-control --origin-access-control-config '{
 # Distribution: S3 (via the OAC) as the default origin, CachingDisabled while iterating,
 # HTTPS via CloudFront's own default certificate (no custom domain needed).
 aws cloudfront create-distribution \
-  --distribution-config file://aws_backend/cloudfront_distribution_config.json
+  --distribution-config file://cloud/aws_backend/cloudfront_distribution_config.json
 # -> returned distribution Id E1910G7OJTPGYC, domain d3nk6zxm1fgda3.cloudfront.net
 
 # Flip the bucket private: only this exact distribution ARN may read it (condition in the
 # policy), Block Public Access re-enabled, and static website hosting removed (CloudFront
 # now serves the page from the bucket's plain REST endpoint instead).
 aws s3api put-bucket-policy --bucket pico2w-telemetry-ui-596633517506 \
-  --policy file://aws_backend/iam/telemetry_ui_bucket_policy.json --region eu-central-1
+  --policy file://cloud/aws_backend/iam/telemetry_ui_bucket_policy.json --region eu-central-1
 aws s3api put-public-access-block --bucket pico2w-telemetry-ui-596633517506 \
   --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true \
   --region eu-central-1
@@ -336,7 +336,7 @@ aws cloudfront wait distribution-deployed --id E1910G7OJTPGYC
 aws cloudfront create-function \
   --name pico2w-telemetry-basic-auth \
   --function-config '{"Comment":"HTTP Basic Auth gate","Runtime":"cloudfront-js-2.0"}' \
-  --function-code fileb://aws_backend/cloudfront_basic_auth_function.js \
+  --function-code fileb://cloud/aws_backend/cloudfront_basic_auth_function.js \
   --region us-east-1
 
 # Test against sample viewer-request events BEFORE going live: one with no Authorization
@@ -366,7 +366,7 @@ openssl rand -hex 24
 
 # get_telemetry_lambda.py updated to 403 unless this exact header is present - see §4.3.
 # The secret itself is set as a Lambda environment variable, never hardcoded in the source.
-cd aws_backend && zip -q get_telemetry_lambda.zip get_telemetry_lambda.py
+cd cloud/aws_backend && zip -q get_telemetry_lambda.zip get_telemetry_lambda.py
 aws lambda update-function-code --function-name pico2w-get-telemetry \
   --zip-file fileb://get_telemetry_lambda.zip --region eu-central-1
 aws lambda update-function-configuration --function-name pico2w-get-telemetry \
@@ -383,7 +383,7 @@ aws cloudfront update-distribution --id E1910G7OJTPGYC \
 aws cloudfront wait distribution-deployed --id E1910G7OJTPGYC --region us-east-1
 
 # web_ui/index.html's default API endpoint updated to the CloudFront URL (same-origin now).
-aws s3 cp web_ui/index.html s3://pico2w-telemetry-ui-596633517506/index.html \
+aws s3 cp cloud/web_ui/index.html s3://pico2w-telemetry-ui-596633517506/index.html \
   --content-type text/html --region eu-central-1
 ```
 
@@ -412,14 +412,14 @@ aws dynamodb put-item --table-name Pico2wAlarmThresholds --item '{
 
 ```bash
 aws iam create-role --role-name Pico2wSetThresholdsLambdaRole \
-  --assume-role-policy-document file://aws_backend/iam/store_telemetry_trust_policy.json
+  --assume-role-policy-document file://cloud/aws_backend/iam/store_telemetry_trust_policy.json
 aws iam attach-role-policy --role-name Pico2wSetThresholdsLambdaRole \
   --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
 aws iam put-role-policy --role-name Pico2wSetThresholdsLambdaRole \
   --policy-name DynamoDBPutThresholds \
-  --policy-document file://aws_backend/iam/set_thresholds_permissions_policy.json
+  --policy-document file://cloud/aws_backend/iam/set_thresholds_permissions_policy.json
 
-cd aws_backend && zip -q set_thresholds_lambda.zip set_thresholds_lambda.py
+cd cloud/aws_backend && zip -q set_thresholds_lambda.zip set_thresholds_lambda.py
 aws lambda create-function \
   --function-name pico2w-set-thresholds --runtime python3.13 \
   --role arn:aws:iam::596633517506:role/Pico2wSetThresholdsLambdaRole \
@@ -458,12 +458,12 @@ aws cloudfront update-distribution --id E1910G7OJTPGYC \
 # Both the write and read paths now read the thresholds table.
 aws iam put-role-policy --role-name Pico2wStoreTelemetryLambdaRole \
   --policy-name DynamoDBGetAlarmThresholds \
-  --policy-document file://aws_backend/iam/alarm_thresholds_read_policy.json
+  --policy-document file://cloud/aws_backend/iam/alarm_thresholds_read_policy.json
 aws iam put-role-policy --role-name Pico2wGetTelemetryLambdaRole \
   --policy-name DynamoDBGetAlarmThresholds \
-  --policy-document file://aws_backend/iam/alarm_thresholds_read_policy.json
+  --policy-document file://cloud/aws_backend/iam/alarm_thresholds_read_policy.json
 
-cd aws_backend
+cd cloud/aws_backend
 zip -q store_telemetry_lambda.zip store_telemetry_lambda.py
 aws lambda update-function-code --function-name pico2w-store-telemetry \
   --zip-file fileb://store_telemetry_lambda.zip --region eu-central-1
@@ -577,23 +577,23 @@ the year 2286 — no zero-padding logic needed.
 
 ### 4.2 Write path: `pico2w-store-telemetry`
 
-[aws_backend/store_telemetry_lambda.py](aws_backend/store_telemetry_lambda.py) — reads
+[aws_backend/store_telemetry_lambda.py](../cloud/aws_backend/store_telemetry_lambda.py) — reads
 `device_id`/`ingest_ts` (attached by the rule's `SELECT`) plus the three telemetry fields off the
 event, converts numerics to `Decimal` (DynamoDB's `boto3` binding rejects native `float`), and
 `put_item`s one row.
 
 - IAM role `Pico2wStoreTelemetryLambdaRole`: `AWSLambdaBasicExecutionRole` (CloudWatch Logs) +
   inline `DynamoDBPutTelemetry` — `dynamodb:PutItem` scoped to just this table
-  ([aws_backend/iam/store_telemetry_permissions_policy.json](aws_backend/iam/store_telemetry_permissions_policy.json)).
+  ([aws_backend/iam/store_telemetry_permissions_policy.json](../cloud/aws_backend/iam/store_telemetry_permissions_policy.json)).
 - IoT Rule `Pico2wStoreTelemetryRule`
-  ([aws_backend/iot_store_telemetry_rule.json](aws_backend/iot_store_telemetry_rule.json)): the
+  ([aws_backend/iot_store_telemetry_rule.json](../cloud/aws_backend/iot_store_telemetry_rule.json)): the
   SQL above, action = invoke `pico2w-store-telemetry`.
 - Resource-based Lambda permission (`IoTRuleInvokeStoreTelemetry`) grants `iot.amazonaws.com`
   invoke rights, scoped by `SourceArn` to this specific rule.
 
 ### 4.3 Read path: `pico2w-get-telemetry`
 
-[aws_backend/get_telemetry_lambda.py](aws_backend/get_telemetry_lambda.py) — `Query`s DynamoDB for
+[aws_backend/get_telemetry_lambda.py](../cloud/aws_backend/get_telemetry_lambda.py) — `Query`s DynamoDB for
 a given `device_id` (query param, defaults to `pico2w-VZ-210726-freertos`), newest-first
 (`ScanIndexForward=False`), up to `limit` (query param, default 20, capped at 500). Converts
 `Decimal` back to `float`/`int` for JSON serialization and returns
@@ -601,7 +601,7 @@ a given `device_id` (query param, defaults to `pico2w-VZ-210726-freertos`), newe
 
 - IAM role `Pico2wGetTelemetryLambdaRole`: `AWSLambdaBasicExecutionRole` + inline
   `DynamoDBQueryTelemetry` — `dynamodb:Query` scoped to just this table
-  ([aws_backend/iam/get_telemetry_permissions_policy.json](aws_backend/iam/get_telemetry_permissions_policy.json)).
+  ([aws_backend/iam/get_telemetry_permissions_policy.json](../cloud/aws_backend/iam/get_telemetry_permissions_policy.json)).
 - API Gateway HTTP API `Pico2wTelemetryApi` (`ApiId o4apfjc495`):
   - CORS: `AllowOrigins=*`, `AllowMethods=GET`, `AllowHeaders=content-type` (now moot for the
     CloudFront path, which is same-origin — see §4.7 — but left in place; harmless).
@@ -615,7 +615,7 @@ Direct endpoint (bypasses the password gate, but returns `403` since Phase 10 �
 
 ### 4.4 Web UI
 
-[web_ui/index.html](web_ui/index.html) — self-contained HTML/JS (no build step, no dependencies):
+[web_ui/index.html](../cloud/web_ui/index.html) — self-contained HTML/JS (no build step, no dependencies):
 editable API endpoint + row-limit fields, a Load button, a 10-second auto-refresh checkbox, a
 Chart.js line chart (§4.5), and a table rendering
 `device_id`/`temperature_c`/`ambient_temp_c`/`humidity_pct`/`reading_ts` per row (with the DHT
@@ -637,21 +637,21 @@ left-to-right as time passing.
 - Origin Access Control `pico2w-telemetry-ui-oac` (`E1Y8E6E71UI0M8`) — lets CloudFront read the S3
   bucket without the bucket being public.
 - CloudFront distribution `E1910G7OJTPGYC` (domain `d3nk6zxm1fgda3.cloudfront.net`)
-  ([aws_backend/cloudfront_distribution_config.json](aws_backend/cloudfront_distribution_config.json)
+  ([aws_backend/cloudfront_distribution_config.json](../cloud/aws_backend/cloudfront_distribution_config.json)
   — the base config used to create it; the live config now also carries the Phase 9/10 additions
   applied via `update-distribution`, not reflected back into this file):
   - Default behavior (`/*`): S3 origin via the OAC, `CachingDisabled`, `redirect-to-https`.
   - HTTPS via CloudFront's own default certificate — no custom domain or ACM cert needed.
 - S3 bucket flipped private: Block Public Access re-enabled, static website hosting removed, and
   the bucket policy
-  ([aws_backend/iam/telemetry_ui_bucket_policy.json](aws_backend/iam/telemetry_ui_bucket_policy.json))
+  ([aws_backend/iam/telemetry_ui_bucket_policy.json](../cloud/aws_backend/iam/telemetry_ui_bucket_policy.json))
   now grants `s3:GetObject` only to `cloudfront.amazonaws.com`, conditioned on `AWS:SourceArn`
   matching this exact distribution — no other distribution, account, or the public can read it.
 
 ### 4.7 Password gate (CloudFront Function, HTTP Basic Auth)
 
 CloudFront Function `pico2w-telemetry-basic-auth`
-([aws_backend/cloudfront_basic_auth_function.js.example](aws_backend/cloudfront_basic_auth_function.js.example)
+([aws_backend/cloudfront_basic_auth_function.js.example](../cloud/aws_backend/cloudfront_basic_auth_function.js.example)
 — the real, credential-bearing file is gitignored, matching this project's existing
 `wifi_credentials.h`/`.h.example` pattern): on `viewer-request`, compares the `Authorization`
 header against a precomputed `"Basic " + base64(user:pass)` string; missing/wrong → `401` +
@@ -691,7 +691,7 @@ Attributes:     temperature_threshold (N)    -- die temp  (temperature_c)
 Billing mode:   PAY_PER_REQUEST
 ```
 
-Write path — [aws_backend/set_thresholds_lambda.py](aws_backend/set_thresholds_lambda.py)
+Write path — [aws_backend/set_thresholds_lambda.py](../cloud/aws_backend/set_thresholds_lambda.py)
 (`pico2w-set-thresholds`): validates a JSON body with numeric `temperature`, `ambient_temp` and
 `humidity`, writes the item, returns what it stored. Same `x-origin-verify` check as the read
 path (§4.8). IAM role `Pico2wSetThresholdsLambdaRole` — `dynamodb:PutItem` on this table only.
@@ -699,13 +699,13 @@ Exposed as `POST /telemetry/thresholds`, which needed no new CloudFront behavior
 existing `/telemetry*` pattern) but did require widening that behavior's `AllowedMethods` — see
 §5.4.
 
-Ingest — [aws_backend/store_telemetry_lambda.py](aws_backend/store_telemetry_lambda.py) reads the
+Ingest — [aws_backend/store_telemetry_lambda.py](../cloud/aws_backend/store_telemetry_lambda.py) reads the
 thresholds (falling back to `45.0`/`35.0`/`70.0` in code if the item doesn't exist yet) and stamps
 up to three booleans onto each reading: `temperature_alarm`, `ambient_temp_alarm`,
 `humidity_alarm`. A flag is only written when its source field is present, so a DHT11 dropout
 (§5.2) yields *no* flag for ambient/humidity rather than a false `false` — verified in §5.4.
 
-Read — [aws_backend/get_telemetry_lambda.py](aws_backend/get_telemetry_lambda.py) passes the
+Read — [aws_backend/get_telemetry_lambda.py](../cloud/aws_backend/get_telemetry_lambda.py) passes the
 booleans through and adds a top-level `thresholds` object, so one poll returns readings, alarm
 state and the active thresholds together:
 
@@ -723,7 +723,7 @@ state and the active thresholds together:
 }
 ```
 
-UI — [web_ui/index.html](web_ui/index.html) gained a "Current values" tile row (temperature,
+UI — [web_ui/index.html](../cloud/web_ui/index.html) gained a "Current values" tile row (temperature,
 ambient, humidity, last update) and an "Alarm values" tile row (the three active thresholds plus
 when they last changed), three threshold inputs and a "Set alarm values" button. Each current-value
 tile turns red via `.in-alarm` driven by *its own* server-supplied flag; the thresholds' timestamp
@@ -858,7 +858,7 @@ curl -s -o /dev/null -w "%{http_code}\n" "https://o4apfjc495.execute-api.eu-cent
 ## 6. Redeploying the Lambdas after a code change
 
 ```bash
-cd aws_backend
+cd cloud/aws_backend
 zip -q store_telemetry_lambda.zip store_telemetry_lambda.py
 aws lambda update-function-code --function-name pico2w-store-telemetry \
   --zip-file fileb://store_telemetry_lambda.zip --region eu-central-1
@@ -883,7 +883,7 @@ curl -s -u "<user>:<pass>" -X POST "https://d3nk6zxm1fgda3.cloudfront.net/teleme
 Updating `web_ui/index.html` (now behind CloudFront, not the old S3 website endpoint):
 
 ```bash
-aws s3 cp web_ui/index.html s3://pico2w-telemetry-ui-596633517506/index.html \
+aws s3 cp cloud/web_ui/index.html s3://pico2w-telemetry-ui-596633517506/index.html \
   --content-type text/html --region eu-central-1
 ```
 
@@ -893,7 +893,7 @@ Changing the dashboard password: edit `EXPECTED_AUTH` in the gitignored
 
 ```bash
 aws cloudfront update-function --name pico2w-telemetry-basic-auth \
-  --function-code fileb://aws_backend/cloudfront_basic_auth_function.js \
+  --function-code fileb://cloud/aws_backend/cloudfront_basic_auth_function.js \
   --if-match <ETag-from-describe-function> --region us-east-1
 aws cloudfront publish-function --name pico2w-telemetry-basic-auth \
   --if-match <ETag-from-the-update-above> --region us-east-1
@@ -906,7 +906,7 @@ and update the `CustomHeaders` value on the API Gateway origin in the distributi
 
 Flashing the DHT11 diagnostics firmware change (§5.2, compiled but not yet deployed to the
 board): `cmake --build build`, then flash via the Pico VS Code extension or `picotool` as usual
-(see [README.md](README.md)'s *Building and flashing* section) — needs the device connected over
+(see [README.md](../README.md)'s *Building and flashing* section) — needs the device connected over
 USB/debug-probe, which this conversation doesn't have.
 
 ---
