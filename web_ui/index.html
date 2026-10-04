@@ -7,15 +7,23 @@
 <style>
   body { font-family: system-ui, sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem; }
   h1 { font-size: 1.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.75rem; }
   .controls { display: flex; gap: .75rem; align-items: end; margin-bottom: 1rem; flex-wrap: wrap; }
   label { display: block; font-size: .8rem; color: #555; }
   input, button { padding: .4rem .6rem; font: inherit; }
+  .stats { display: flex; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap; }
+  .stat { flex: 1; min-width: 8rem; border: 1px solid #ddd; border-radius: 6px; padding: 1rem; text-align: center; }
+  .value { font-size: 1.75rem; font-weight: 700; }
+  .value.ts { font-size: .9rem; font-weight: 600; }
+  .value.in-alarm { color: #ec0a0a; }
+  .label { color: #666; font-size: .8rem; text-transform: uppercase; }
   .chart-box { position: relative; height: 22rem; margin-bottom: 1.5rem; }
   table { border-collapse: collapse; width: 100%; }
   th, td { padding: .4rem .6rem; text-align: right; border-bottom: 1px solid #ddd; }
   th:nth-child(2), td:nth-child(2), th:last-child, td:last-child { text-align: left; }
   th { background: #f4f4f4; font-size: .8rem; }
-  #status { margin: .75rem 0; font-size: .85rem; color: #666; }
+  td.in-alarm { color: #ec0a0a; font-weight: 600; }
+  #status, #alarm-status { margin: .75rem 0; font-size: .85rem; color: #666; }
   .err { color: #b00; }
 </style>
 </head>
@@ -38,10 +46,46 @@
 
 <div id="status"></div>
 
+<h2>Current values</h2>
+<div class="stats">
+  <div class="stat"><div class="value" id="cur-temp">--</div><div class="label">Temperature &deg;C</div></div>
+  <div class="stat"><div class="value" id="cur-ambient">--</div><div class="label">Ambient &deg;C</div></div>
+  <div class="stat"><div class="value" id="cur-humidity">--</div><div class="label">Humidity %</div></div>
+  <div class="stat"><div class="value ts" id="cur-ts">--</div><div class="label">Last update</div></div>
+</div>
+
+<h2>Trends</h2>
 <div class="chart-box">
   <canvas id="chart"></canvas>
 </div>
 
+<h2>Alarm values</h2>
+<div class="stats">
+  <div class="stat"><div class="value" id="thr-temp">--</div><div class="label">Temperature &deg;C</div></div>
+  <div class="stat"><div class="value" id="thr-ambient">--</div><div class="label">Ambient &deg;C</div></div>
+  <div class="stat"><div class="value" id="thr-humidity">--</div><div class="label">Humidity %</div></div>
+  <div class="stat"><div class="value ts" id="thr-ts">--</div><div class="label">Last update</div></div>
+</div>
+
+<div class="controls">
+  <div>
+    <label for="set-temp">Temperature threshold</label>
+    <input id="set-temp" type="number" step="0.1" style="width:7rem">
+  </div>
+  <div>
+    <label for="set-ambient">Ambient threshold</label>
+    <input id="set-ambient" type="number" step="0.1" style="width:7rem">
+  </div>
+  <div>
+    <label for="set-humidity">Humidity threshold</label>
+    <input id="set-humidity" type="number" step="0.1" style="width:7rem">
+  </div>
+  <button id="set-alarm">Set alarm values</button>
+</div>
+
+<div id="alarm-status"></div>
+
+<h2>Recent readings</h2>
 <table>
   <thead><tr><th>#</th><th>Device</th><th>Temp &deg;C</th><th>Ambient &deg;C</th><th>Humidity %</th><th>Reading time</th></tr></thead>
   <tbody id="rows"></tbody>
@@ -50,6 +94,9 @@
 <script>
 const $ = id => document.getElementById(id);
 let timer = null;
+// The threshold inputs are seeded from the server once, then left alone - otherwise
+// auto-refresh would overwrite whatever the user is in the middle of typing.
+let thresholdInputsSeeded = false;
 
 const chart = new Chart($('chart'), {
   type: 'line',
@@ -97,6 +144,43 @@ const chart = new Chart($('chart'), {
   },
 });
 
+function setTile(id, text, inAlarm) {
+  const el = $(id);
+  el.textContent = text;
+  el.classList.toggle('in-alarm', !!inAlarm);
+}
+
+function renderCurrent(reading) {
+  if (!reading) return;
+  setTile('cur-temp', reading.temperature_c?.toFixed(2) ?? '--', reading.temperature_alarm);
+  setTile('cur-ambient', reading.ambient_temp_c?.toFixed(2) ?? '--', reading.ambient_temp_alarm);
+  setTile('cur-humidity',
+      reading.humidity_pct?.toFixed(1) ?? (reading.dht_err ? `err: ${reading.dht_err}` : '--'),
+      reading.humidity_alarm);
+  setTile('cur-ts', new Date(reading.reading_ts).toLocaleString(), false);
+}
+
+function renderThresholds(thresholds, latest) {
+  if (!thresholds) return;
+  setTile('thr-temp', thresholds.temperature_threshold?.toFixed(2) ?? '--', false);
+  setTile('thr-ambient', thresholds.ambient_temp_threshold?.toFixed(2) ?? '--', false);
+  setTile('thr-humidity', thresholds.humidity_threshold?.toFixed(1) ?? '--', false);
+
+  // Mirrors the "any alarm active" indication: the timestamp tile goes red when the
+  // most recent reading has tripped any of the three thresholds.
+  const anyAlarm = !!(latest && (latest.temperature_alarm || latest.ambient_temp_alarm || latest.humidity_alarm));
+  setTile('thr-ts',
+      thresholds.updated_ts ? new Date(thresholds.updated_ts).toLocaleString() : 'default',
+      anyAlarm);
+
+  if (!thresholdInputsSeeded) {
+    $('set-temp').value = thresholds.temperature_threshold;
+    $('set-ambient').value = thresholds.ambient_temp_threshold;
+    $('set-humidity').value = thresholds.humidity_threshold;
+    thresholdInputsSeeded = true;
+  }
+}
+
 async function load() {
   const url = new URL($('url').value);
   url.searchParams.set('limit', $('limit').value);
@@ -112,11 +196,15 @@ async function load() {
       <tr>
         <td>${i + 1}</td>
         <td>${r.device_id}</td>
-        <td>${r.temperature_c?.toFixed(2) ?? '-'}</td>
-        <td>${r.ambient_temp_c?.toFixed(2) ?? '-'}</td>
-        <td>${r.humidity_pct?.toFixed(1) ?? (r.dht_err ? `err: ${r.dht_err}` : '-')}</td>
+        <td class="${r.temperature_alarm ? 'in-alarm' : ''}">${r.temperature_c?.toFixed(2) ?? '-'}</td>
+        <td class="${r.ambient_temp_alarm ? 'in-alarm' : ''}">${r.ambient_temp_c?.toFixed(2) ?? '-'}</td>
+        <td class="${r.humidity_alarm ? 'in-alarm' : ''}">${r.humidity_pct?.toFixed(1) ?? (r.dht_err ? `err: ${r.dht_err}` : '-')}</td>
         <td>${new Date(r.reading_ts).toLocaleString()}</td>
       </tr>`).join('');
+
+    const latest = data.readings[0];
+    renderCurrent(latest);
+    renderThresholds(data.thresholds, latest);
 
     // The API returns newest-first; the chart reads left-to-right chronologically.
     const chronological = [...data.readings].reverse();
@@ -134,7 +222,39 @@ async function load() {
   }
 }
 
+async function setAlarmThresholds() {
+  const temperature = parseFloat($('set-temp').value);
+  const ambient_temp = parseFloat($('set-ambient').value);
+  const humidity = parseFloat($('set-humidity').value);
+
+  if ([temperature, ambient_temp, humidity].some(Number.isNaN)) {
+    $('alarm-status').textContent = 'Enter numeric values for all three thresholds.';
+    $('alarm-status').className = 'err';
+    return;
+  }
+
+  $('alarm-status').textContent = 'Saving...';
+  $('alarm-status').className = '';
+
+  try {
+    const res = await fetch(`${$('url').value}/thresholds`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ temperature, ambient_temp, humidity }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    await res.json();
+    $('alarm-status').textContent =
+      `Thresholds saved ${new Date().toLocaleTimeString()} · they apply to readings from now on`;
+    await load();
+  } catch (e) {
+    $('alarm-status').textContent = `Failed: ${e.message}`;
+    $('alarm-status').className = 'err';
+  }
+}
+
 $('load').onclick = load;
+$('set-alarm').onclick = setAlarmThresholds;
 $('auto').onchange = e => {
   clearInterval(timer);
   if (e.target.checked) timer = setInterval(load, 10000);

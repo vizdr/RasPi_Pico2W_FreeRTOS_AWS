@@ -35,9 +35,11 @@ extern "C" {
  *
  * @param level    pin level sampled in the ISR, after the edge (true = motion).
  *                 If a rise and a fall were both latched, this says which came last.
- * @param time_ms  ms since boot, sampled in the ISR
+ * @param time_ms  ms since boot, sampled in the ISR: time_us_64() / 1000, 64-bit so it
+ *                 never wraps (the SDK's to_ms_since_boot() is 32-bit and wraps after
+ *                 49.7 days)
  */
-typedef void (*pir_edge_cb_t)(bool level, uint32_t time_ms);
+typedef void (*pir_edge_cb_t)(bool level, uint64_t time_ms);
 
 typedef struct {
     uint          out_pin;     /**< RJ25 S2, sensor output */

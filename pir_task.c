@@ -44,7 +44,7 @@
 /* ---- shared state ------------------------------------------------------- */
 
 typedef struct {
-    uint32_t time_ms;
+    uint64_t time_ms;
     bool     level;
 } pir_event_t;
 
@@ -55,14 +55,20 @@ static pir_status_t      s_status;
 static volatile bool     s_ready;
 static volatile uint32_t s_queue_overflows;
 
+/* The same clock as the ISR's edge timestamps (pir.c): 64-bit ms since boot. */
+static uint64_t pir_now_ms(void)
+{
+    return time_us_64() / 1000u;
+}
+
 __attribute__((weak))
-void pir_on_motion_start(uint32_t time_ms)
+void pir_on_motion_start(uint64_t time_ms)
 {
     (void)time_ms;
 }
 
 __attribute__((weak))
-void pir_on_motion_stop(uint32_t time_ms, uint32_t duration_ms)
+void pir_on_motion_stop(uint64_t time_ms, uint32_t duration_ms)
 {
     (void)time_ms;
     (void)duration_ms;
@@ -89,7 +95,7 @@ void pir_task_set_retrigger(bool retriggerable)
 /* Driver edge callback, interrupt context. IO_IRQ_BANK0 runs at
  * PICO_DEFAULT_IRQ_PRIORITY (0x80), numerically above
  * configMAX_SYSCALL_INTERRUPT_PRIORITY (16), so the FromISR API is allowed. */
-static void pir_on_edge_isr(bool level, uint32_t time_ms)
+static void pir_on_edge_isr(bool level, uint64_t time_ms)
 {
     pir_event_t ev = {
         .time_ms = time_ms,
@@ -105,13 +111,13 @@ static void pir_on_edge_isr(bool level, uint32_t time_ms)
 
 /* ---- task --------------------------------------------------------------- */
 
-static void pir_apply(bool level, uint32_t time_ms)
+static void pir_apply(bool level, uint64_t time_ms)
 {
     if (level == s_status.motion) {
         return;     /* sub-latency glitch, or already resynced by polling */
     }
 
-    uint32_t duration_ms = time_ms - s_status.last_change_ms;
+    uint32_t duration_ms = (uint32_t)(time_ms - s_status.last_change_ms);
 
     taskENTER_CRITICAL();
     s_status.motion         = level;
@@ -141,7 +147,7 @@ static void pir_task(void *arg)
      * then taken directly. */
     pir_irq_enable(&s_dev, pir_on_edge_isr);
 
-    s_status.last_change_ms = to_ms_since_boot(get_absolute_time());
+    s_status.last_change_ms = pir_now_ms();
     s_ready = true;
     printf("[pir] ready\n");
     pir_apply(pir_read(&s_dev), s_status.last_change_ms);
@@ -155,7 +161,7 @@ static void pir_task(void *arg)
         if (xQueueReceive(s_queue, &ev, pdMS_TO_TICKS(PIR_RESYNC_MS)) == pdTRUE) {
             pir_apply(ev.level, ev.time_ms);
         } else {
-            pir_apply(pir_read(&s_dev), to_ms_since_boot(get_absolute_time()));
+            pir_apply(pir_read(&s_dev), pir_now_ms());
         }
 
         if (s_queue_overflows != reported_overflows) {

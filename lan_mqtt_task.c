@@ -26,7 +26,6 @@
 
 #include "lan_mqtt_task.h"
 #include "lan_mqtt_config.h"
-#include "boot_time.h"
 #include "pir_task.h"
 #include "time_task.h"
 #include "watchdog_task.h"
@@ -84,8 +83,8 @@
 /* ---- state -------------------------------------------------------------- */
 
 typedef struct {
+    uint64_t time_ms;        /* edge time from the ISR, ms since boot (never wraps) */
     uint32_t seq;            /* motion_count: a start and its stop share it */
-    uint32_t time_ms;        /* edge time from the ISR, 32-bit ms since boot */
     uint32_t duration_ms;    /* stop only */
     bool     start;
 } lan_event_t;
@@ -137,7 +136,7 @@ static void lan_wake(void)
 
 /* ---- PIR hooks (pir task context) ---------------------------------------- */
 
-static void lan_enqueue(bool start, uint32_t time_ms, uint32_t duration_ms)
+static void lan_enqueue(bool start, uint64_t time_ms, uint32_t duration_ms)
 {
     pir_status_t st;
     lan_event_t ev = {
@@ -155,12 +154,12 @@ static void lan_enqueue(bool start, uint32_t time_ms, uint32_t duration_ms)
     lan_wake();
 }
 
-void pir_on_motion_start(uint32_t time_ms)
+void pir_on_motion_start(uint64_t time_ms)
 {
     lan_enqueue(true, time_ms, 0u);
 }
 
-void pir_on_motion_stop(uint32_t time_ms, uint32_t duration_ms)
+void pir_on_motion_stop(uint64_t time_ms, uint32_t duration_ms)
 {
     lan_enqueue(false, time_ms, duration_ms);
 }
@@ -286,7 +285,7 @@ static int lan_handle_acks(void)
             uint64_t now64 = boot_ms_now();
             printf("[lan_mqtt] sent %s #%" PRIu32 ", %" PRIu64 " ms after the edge\n",
                    out->ev.start ? "start" : "stop", out->ev.seq,
-                   now64 - boot_ms_widen(now64, out->ev.time_ms));
+                   now64 - out->ev.time_ms);
             out->state = OUT_DONE;
             break;
         }
@@ -363,7 +362,7 @@ static void lan_publish_state(void)
                        "{\"motion\":%s,\"changed_ms\":%" PRIu64 ",\"count\":%" PRIu32
                        ",\"dropped\":%" PRIu32 ",\"boot_ms\":%" PRIu64 "}",
                        st.motion ? "true" : "false",
-                       boot_ms_widen(now64, st.last_change_ms),
+                       st.last_change_ms,
                        st.motion_count, s_dropped, now64);
     } else {
         len = snprintf(buf, sizeof buf,
@@ -375,7 +374,7 @@ static void lan_publish_state(void)
 static int lan_format_event(char *buf, size_t size, const lan_event_t *ev)
 {
     uint64_t now64 = boot_ms_now();
-    uint64_t at64  = boot_ms_widen(now64, ev->time_ms);   /* the edge, not now (rule 2) */
+    uint64_t at64  = ev->time_ms;   /* the edge, not now (rule 2) */
 
     char duration[32] = "";
     if (!ev->start) {

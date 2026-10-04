@@ -91,7 +91,7 @@ Re-checked against this repository on 2026-10-03 (§7).
 | Item | Current state (file) | Consequence |
 |---|---|---|
 | PIR driver | `pir.c/h`: raw GPIO IRQ on the shared `IO_IRQ_BANK0` (`gpio_add_raw_irq_handler`, coexists with CYW43), level-based edge handling, S1 mode pin on GPIO 13 | Done. Nothing to change |
-| Edge timestamp | `pir.c:37`: `to_ms_since_boot(get_absolute_time())`, a **32-bit** millisecond counter that wraps after **49.7 days** | The Pi treats `boot_ms` going backwards as a Pico reboot. Payloads therefore carry a **64-bit** `boot_ms` (§3.3), widened in `lan_mqtt_task`, not in the ISR |
+| Edge timestamp | `pir.c:37`: `to_ms_since_boot(get_absolute_time())`, a **32-bit** millisecond counter that wraps after **49.7 days** | The Pi treats `boot_ms` going backwards as a Pico reboot. Payloads therefore carry a **64-bit** `boot_ms` (§3.3). *Since 2026-10-04 the ISR itself takes 64-bit `time_us_64() / 1000`, kept 64-bit end to end; first it was widened in `lan_mqtt_task`* |
 | PIR service | `pir_task.c/h`: ISR→task queue (`PIR_QUEUE_LEN 8`), 30 s warm-up, 1 s level resync (`PIR_RESYNC_MS`), `pir_status_t {motion, motion_count, last_change_ms}`, weak hooks | Hooks need a **timestamp parameter**. Today they are `pir_on_motion_start(void)` and `pir_on_motion_stop(duration_ms)`; `pir_apply()` already has `time_ms` |
 | Warm-up | `pir_get_status()` returns **false** while the sensor warms up (30 s after boot) | The on-connect `pir/state` publish needs a warm-up variant (§3.2) |
 | Resync path | If an edge is missed, the 1 s poll applies the new level with the poll time | Such an event is up to ~1 s late. Harmless: the Pi's clip cut is keyframe-rounded to 2 s anyway |
@@ -148,9 +148,9 @@ Field meanings:
 |---|---|---|
 | `seq` | `motion_count` | A start and its stop share it. It exposes gaps |
 | `event` | hook | `start` or `stop` |
-| `boot_ms` in `pir/event` | the ISR timestamp, widened to 64 bit | When the edge happened, on the Pico's clock |
+| `boot_ms` in `pir/event` | the ISR timestamp (64-bit) | When the edge happened, on the Pico's clock |
 | `boot_ms` in `pir/state` | `time_us_64() / 1000` at publish | When the state was published, on the Pico's clock |
-| `changed_ms` | `last_change_ms`, widened | When the last start or stop happened |
+| `changed_ms` | `last_change_ms` (64-bit) | When the last start or stop happened |
 | `count` | `motion_count` | Starts since boot |
 | `dropped` | the LAN queue's drop counter | Events lost because the queue was full (optional; the Pi shows it if present) |
 | `duration_ms` | hook | Length of the motion that just ended |
@@ -174,11 +174,11 @@ keep five rules:
    stream it goes backwards only at a reboot, which is how the Pi detects one. The Pi never
    uses events for that: a queued event's `boot_ms` is older than the latest state's by
    design (rule 2).
-   - Keep the hooks and the ISR on the cheap 32-bit value.
-   - Widen it in `lan_mqtt_task` when building the payload:
-     `ev64 = now64 − (uint32_t)(now32 − ev32)`, with `now64 = time_us_64() / 1000` and
-     `now32 = (uint32_t)now64`, taken together.
-   - This is exact for any event younger than 49.7 days.
+   - The ISR stamps each edge with `time_us_64() / 1000`, and that 64-bit value travels
+     unchanged through the queue, the hooks, `pir_status_t` and the outbox into the payload.
+   - Not the SDK's `to_ms_since_boot()`: it is 32-bit and wraps after 49.7 days.
+   - *Until 2026-10-04 the hooks carried the 32-bit value and `lan_mqtt_task` widened it with
+     `now64 − (uint32_t)(now32 − ev32)`; replaced to remove that step (§6).*
 2. **An event's `boot_ms` is the edge time from the ISR**, never the publish time. A queued or
    retried event keeps its original value.
 3. **`pir/state`'s `boot_ms` is the publish time.** That is what makes it a clock reference.
@@ -281,8 +281,8 @@ Phase numbers are shared with the VMS copy.
 1. **Hooks with timestamps:**
 
    ```c
-   void pir_on_motion_start(uint32_t time_ms);
-   void pir_on_motion_stop(uint32_t time_ms, uint32_t duration_ms);
+   void pir_on_motion_start(uint64_t time_ms);   // 64-bit since 2026-10-04 (§3.3)
+   void pir_on_motion_stop(uint64_t time_ms, uint32_t duration_ms);
    ```
 
    - Pass `time_ms` through from `pir_apply()`, which already has it.
@@ -308,7 +308,7 @@ Phase numbers are shared with the VMS copy.
        task. This queue is separate from `pir_task`'s own ISR queue (`PIR_QUEUE_LEN 8`);
      - `seq` = `motion_count`, read with `pir_get_status()` in the hook (a start and its stop
        share it);
-     - loop: `xQueuePeek()` → widen `time_ms` to 64-bit (§3.3) → build the payload →
+     - loop: `xQueuePeek()` → build the payload from the 64-bit `time_ms` (§3.3) →
        `mqtt_publish()` → wait for **that publish's PUBACK** → `xQueueReceive()`. On
        `ERR_MEM`, back off ~50 ms and retry; on a disconnect or a missing PUBACK the event
        stays at the head and is sent again (§3.4);
@@ -341,8 +341,8 @@ Phase numbers are shared with the VMS copy.
    - right after boot, `pir/state` arrives in its warm-up form, and the normal form after the
      30 s warm-up;
    - `pir/state` arrives every 30 s with a growing `boot_ms`;
-   - **widening near the wrap:** a unit test of the widening helper with `now32` just after
-     the 32-bit wrap and `ev32` just before it gives the right 64-bit value;
+   - ~~widening near the wrap: a unit test of the widening helper~~ (no longer applies: the
+     timestamps are 64-bit from the ISR on, so there is nothing to widen);
    - with the broker stopped for a minute, waves are queued, and after reconnect they arrive
      in order with their original `boot_ms`, after `status` and `pir/state`;
    - powering off the Pico yields `offline` after ~45 s;
@@ -356,7 +356,7 @@ Phase numbers are shared with the VMS copy.
 |---|---|
 | Hooks with timestamps | `pir_task.h/.c`; README-PIR.md §1 and §5 |
 | LAN MQTT task | `lan_mqtt_task.c/h`; started in `main.c` at `tskIDLE_PRIORITY + 2`, 1024-word stack; added to `CMakeLists.txt` |
-| 64-bit `boot_ms` | `boot_time.h` (`boot_ms_widen()`), host-tested by `tests/boot_time_test.c` |
+| 64-bit `boot_ms` | First `boot_time.h` (`boot_ms_widen()`) with `tests/boot_time_test.c`; **removed 2026-10-04**: the ISR takes a 64-bit timestamp |
 | Configuration | `lan_mqtt_config.h.example` (committed); `lan_mqtt_config.h` gitignored |
 | lwIP | `lwipopts.h`: `MEM_SIZE 16000`, `MQTT_OUTPUT_RINGBUF_SIZE 512`, `MEMP_NUM_SYS_TIMEOUT 18` |
 
@@ -383,7 +383,8 @@ Details the plan didn't fix, decided while implementing:
 
 Checks done: the firmware builds with no warnings; `lan_mqtt_task.c` and `pir_task.c` are clean
 under `-Wall -Wextra`; `tests/boot_time_test.c` passes all 8 cases, including events just before
-and across the 32-bit wrap; the linked image has the strong hook overrides. **All other §4.3
+and across the 32-bit wrap (helper and test removed 2026-10-04); the linked image has the strong
+hook overrides. **All other §4.3
 checks need the board and the broker.**
 
 ### 4.4 Phase 13: the Pico's part
@@ -600,6 +601,7 @@ entry in VMS `FoundAndFixed.md`, since it concerns the Pi's hardware.
 | Reconnect back-off 1 s → 30 s | **Changed:** 1 s → 5 s | VMS FoundAndFixed #52: the broker's Pi drops off Wi‑Fi for 40 s–3 min; the Pi drops events older than 60 s |
 | `resolve_endpoint()` in `aws_iot_task.c` | **Fixed:** a timed-out lookup no longer reuses the previous success | VMS FoundAndFixed #54: the AWS endpoint does move |
 | §4.5 existed only in the VMS copy of this file | **Merged** here | This copy is authoritative for the firmware |
+| PIR timestamps 32-bit in the ISR, hooks and queues; widened to 64-bit in `lan_mqtt_task` (`boot_time.h`) | **Changed:** 64-bit from the ISR on (`time_us_64() / 1000`); hooks are `pir_on_motion_start(uint64_t)`, `pir_on_motion_stop(uint64_t, uint32_t)`; `pir_status_t.last_change_ms` is 64-bit; `boot_time.h` and its test removed | Simpler: nothing to widen. The SDK computes the 64-bit value in `to_ms_since_boot()` anyway before truncating, so the ISR costs the same. Durations stay 32-bit |
 | D14 open | **Decided and implemented:** reset after 4 min without Wi‑Fi, with a hardware watchdog that also covers hung tasks and crashes (§4.7) | Decision 2026-10-04 |
 
 ---

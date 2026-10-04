@@ -12,7 +12,7 @@
 typedef struct {
     bool     motion;            // output currently high
     uint32_t motion_count;      // number of motion-start events since boot
-    uint32_t last_change_ms;    // ms since boot of the last start/stop
+    uint64_t last_change_ms;    // ms since boot of the last start/stop
 } pir_status_t;
 
 // Initialises the driver (pins, edge ISR, retriggerable mode), then creates the task.
@@ -28,9 +28,9 @@ void pir_task_set_retrigger(bool retriggerable);
 
 // Weak hooks, called from the pir task (not the ISR) - override to act on motion.
 // Keep them short and non-blocking: post to a queue and return.
-// time_ms is when the edge happened (ms since boot, sampled in the ISR - 32-bit, wraps
-// after 49.7 days); duration_ms is the length of the motion that just ended. When a
-// hook runs, pir_get_status() already reflects the new state, and its motion_count is
-// shared by a start and its stop.
-void pir_on_motion_start(uint32_t time_ms);
-void pir_on_motion_stop(uint32_t time_ms, uint32_t duration_ms);
+// time_ms is when the edge happened (ms since boot, sampled in the ISR; 64-bit, never
+// wraps); duration_ms is the length of the motion that just ended. When a hook runs,
+// pir_get_status() already reflects the new state, and its motion_count is shared by a
+// start and its stop.
+void pir_on_motion_start(uint64_t time_ms);
+void pir_on_motion_stop(uint64_t time_ms, uint32_t duration_ms);

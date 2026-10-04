@@ -13,7 +13,8 @@ mutual-TLS MQTT (see `aws_iot_task.c`) and an existing IoT Rule already forwards
 Everything in Phases 1–6 is a second rule + a small serverless backend added alongside that, on
 the AWS side only. The original SQS path is untouched. Phases 7–11 added a line-chart dashboard,
 HTTPS, and password protection (AWS-side + a small, optional firmware diagnostics addition — see
-§5.2).
+§5.2). Phases 13–17 added configurable alarm thresholds with visual indication, adapted from
+[vizdr/ES-Design-WS-Gui](https://github.com/vizdr/ES-Design-WS-Gui) — see §4.9.
 
 ---
 
@@ -31,13 +32,16 @@ Browser --HTTPS--> CloudFront (single distribution, default *.cloudfront.net dom
                       |
                       +-- behavior "/telemetry*" --> API Gateway origin (+ shared-secret header)
                                                           |
-                                                          v
-                                                Lambda: pico2w-get-telemetry (verifies the secret)
-                                                          |
-                                                          v
-                                                DynamoDB table: Pico2wTelemetry
-                                                          ^
-                                                          | PutItem
+                                      GET /telemetry       |       POST /telemetry/thresholds
+                                                v          |          v
+                                 Lambda: pico2w-get-telemetry    Lambda: pico2w-set-thresholds
+                                      (both verify the secret)         |
+                                                |      \               v
+                                                |       \--> DynamoDB: Pico2wAlarmThresholds
+                                                v                      ^
+                                                DynamoDB: Pico2wTelemetry  | GetItem (at ingest,
+                                                          ^                |  to stamp alarm flags)
+                                                          | PutItem        |
                                                 Lambda: pico2w-store-telemetry
                                                           ^
                                                           | (new rule)
@@ -90,6 +94,21 @@ the dashboard, requested once the core pipeline was already working end-to-end.
     unplanned but real) investigation into a DHT11 sensor dropout discovered during this pass —
     see §5.2.
 12. **Documentation** — this update.
+
+Phases 13–17 added configurable alarm thresholds with visual indication in the dashboard,
+adapting the pattern from [vizdr/ES-Design-WS-Gui](https://github.com/vizdr/ES-Design-WS-Gui)
+(a Tornado/WebSocket project) to this serverless, polling-based architecture — see §3.
+
+13. **Threshold storage** — a small `Pico2wAlarmThresholds` DynamoDB table, seeded with defaults.
+14. **Set-thresholds endpoint** — `pico2w-set-thresholds` Lambda + its IAM role, and a
+    `POST /telemetry/thresholds` route on the existing API (no new CloudFront behavior needed —
+    it falls under the existing `/telemetry*` path pattern).
+15. **Alarm flags** — `pico2w-store-telemetry` stamps `temperature_alarm`/`ambient_temp_alarm`/
+    `humidity_alarm` onto every reading at ingest; `pico2w-get-telemetry` passes them through and
+    adds the active `thresholds` to its response.
+16. **Web UI** — "Current values" and "Alarm values" stat tiles, threshold inputs + a
+    "Set alarm values" button, and red `.in-alarm` indication on tiles and table cells.
+17. **Verification + documentation** — see §5.4; this update.
 
 ### 2.2 AWS CLI commands applied
 
@@ -368,6 +387,91 @@ aws s3 cp web_ui/index.html s3://pico2w-telemetry-ui-596633517506/index.html \
   --content-type text/html --region eu-central-1
 ```
 
+**Phase 13 — alarm threshold storage**
+
+```bash
+# One item per device; no sort key, since there's exactly one threshold set per device.
+aws dynamodb create-table \
+  --table-name Pico2wAlarmThresholds \
+  --attribute-definitions AttributeName=device_id,AttributeType=S \
+  --key-schema AttributeName=device_id,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST --region eu-central-1
+aws dynamodb wait table-exists --table-name Pico2wAlarmThresholds --region eu-central-1
+
+# Seed the defaults (the Lambdas also fall back to these in code if the item is missing).
+aws dynamodb put-item --table-name Pico2wAlarmThresholds --item '{
+  "device_id": {"S": "pico2w-VZ-210726-freertos"},
+  "temperature_threshold": {"N": "45.0"},
+  "ambient_temp_threshold": {"N": "35.0"},
+  "humidity_threshold": {"N": "70.0"},
+  "updated_ts": {"S": "<epoch-ms>"}
+}' --region eu-central-1
+```
+
+**Phase 14 — set-thresholds Lambda + route**
+
+```bash
+aws iam create-role --role-name Pico2wSetThresholdsLambdaRole \
+  --assume-role-policy-document file://aws_backend/iam/store_telemetry_trust_policy.json
+aws iam attach-role-policy --role-name Pico2wSetThresholdsLambdaRole \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+aws iam put-role-policy --role-name Pico2wSetThresholdsLambdaRole \
+  --policy-name DynamoDBPutThresholds \
+  --policy-document file://aws_backend/iam/set_thresholds_permissions_policy.json
+
+cd aws_backend && zip -q set_thresholds_lambda.zip set_thresholds_lambda.py
+aws lambda create-function \
+  --function-name pico2w-set-thresholds --runtime python3.13 \
+  --role arn:aws:iam::596633517506:role/Pico2wSetThresholdsLambdaRole \
+  --handler set_thresholds_lambda.lambda_handler \
+  --zip-file fileb://set_thresholds_lambda.zip \
+  --timeout 10 --memory-size 128 --region eu-central-1
+aws lambda update-function-configuration --function-name pico2w-set-thresholds \
+  --environment "Variables={ORIGIN_VERIFY_SECRET=<the-same-secret>}" --region eu-central-1
+
+# New route on the existing HTTP API. No CloudFront change was needed for routing -
+# /telemetry/thresholds already matches the existing /telemetry* behavior.
+aws apigatewayv2 create-integration --api-id o4apfjc495 --integration-type AWS_PROXY \
+  --integration-uri arn:aws:lambda:eu-central-1:596633517506:function:pico2w-set-thresholds \
+  --payload-format-version 2.0 --region eu-central-1
+aws apigatewayv2 create-route --api-id o4apfjc495 \
+  --route-key "POST /telemetry/thresholds" --target "integrations/<IntegrationId>" \
+  --region eu-central-1
+aws lambda add-permission --function-name pico2w-set-thresholds \
+  --statement-id ApiGatewayInvokeSetThresholds --action lambda:InvokeFunction \
+  --principal apigateway.amazonaws.com \
+  --source-arn "arn:aws:execute-api:eu-central-1:596633517506:o4apfjc495/*/*/telemetry/thresholds" \
+  --region eu-central-1
+
+# ...but CloudFront DID need one: the /telemetry* behavior was GET/HEAD-only from Phase 10,
+# so POST was rejected with a CloudFront 403 before the request ever reached the auth
+# function. CloudFront only accepts specific AllowedMethods sets, so allowing POST means
+# taking the full 7-method set (CachedMethods stays GET/HEAD - POST is never cached).
+aws cloudfront get-distribution-config --id E1910G7OJTPGYC --region us-east-1
+aws cloudfront update-distribution --id E1910G7OJTPGYC \
+  --distribution-config file://<modified-config>.json --if-match <ETag> --region us-east-1
+```
+
+**Phase 15 — alarm flags at ingest**
+
+```bash
+# Both the write and read paths now read the thresholds table.
+aws iam put-role-policy --role-name Pico2wStoreTelemetryLambdaRole \
+  --policy-name DynamoDBGetAlarmThresholds \
+  --policy-document file://aws_backend/iam/alarm_thresholds_read_policy.json
+aws iam put-role-policy --role-name Pico2wGetTelemetryLambdaRole \
+  --policy-name DynamoDBGetAlarmThresholds \
+  --policy-document file://aws_backend/iam/alarm_thresholds_read_policy.json
+
+cd aws_backend
+zip -q store_telemetry_lambda.zip store_telemetry_lambda.py
+aws lambda update-function-code --function-name pico2w-store-telemetry \
+  --zip-file fileb://store_telemetry_lambda.zip --region eu-central-1
+zip -q get_telemetry_lambda.zip get_telemetry_lambda.py
+aws lambda update-function-code --function-name pico2w-get-telemetry \
+  --zip-file fileb://get_telemetry_lambda.zip --region eu-central-1
+```
+
 ---
 
 ## 3. Design decisions
@@ -415,6 +519,38 @@ a fixed custom header to its origin requests; `pico2w-get-telemetry` checks it a
 otherwise. Simple, no extra infrastructure (no Lambda authorizer needed), but it is a static
 shared secret, not a rotated credential — acceptable here, not a pattern to copy for anything more
 sensitive.
+
+**Alarms computed server-side at ingest, not client-side at render.** Adapted from
+[vizdr/ES-Design-WS-Gui](https://github.com/vizdr/ES-Design-WS-Gui), whose Tornado server checks
+each reading against the thresholds and pushes `temperature_alarm`/`humidity_alarm` booleans to
+the browser, which only renders them. Same split here: `pico2w-store-telemetry` stamps the flags
+onto the DynamoDB item as the reading arrives, so an alarm becomes a *persisted fact about that
+reading* rather than a function of whatever the thresholds happen to be when someone later opens
+the page. The alternative (compare in JavaScript at render time) would mean the same historical
+reading shows as alarming or not depending on the current threshold — fine for a live-only view,
+wrong for a table of past readings.
+
+**Polling, not WebSocket push.** The reference pushes alarm state over a WebSocket because it has
+a long-lived Tornado process to push from. This project is serverless, and a WebSocket equivalent
+would mean an API Gateway WebSocket API, a connections table, and rethinking auth (the CloudFront
+Basic Auth gate doesn't cover a WebSocket upgrade). The dashboard already polls every 10s, which
+is exactly the device's publish interval — an alarm cannot surface faster than the data that
+causes it, so the added infrastructure would buy nothing here.
+
+**Three independent thresholds, including the die temperature.** `temperature_c` (RP2350 die) and
+`ambient_temp_c` (DHT11 room) are different physical quantities that happen to share a unit — the
+die idles around 34–37 °C, so a single shared threshold would either false-alarm constantly or be
+useless for room temperature. Each gets its own threshold and its own flag
+(`temperature_alarm` / `ambient_temp_alarm`), plus `humidity_alarm`.
+
+**Thresholds in their own DynamoDB table, not the telemetry table.** `Pico2wAlarmThresholds` is a
+single item per device, keyed by `device_id` alone. Keeping it separate means each Lambda's IAM
+policy stays narrow and obvious (`PutItem` on thresholds only, for the setter; `GetItem` on
+thresholds plus `Query` on telemetry, for the reader) instead of one broad grant over a table
+holding two unrelated kinds of row.
+
+**`>=` comparison, matching the reference.** A reading exactly equal to its threshold counts as
+in-alarm. Verified explicitly (§5.4) rather than assumed.
 
 **One chart, dual Y-axis, category (not time-scale) X-axis.** Temperature and humidity share one
 `<canvas>` with independent left/right axes rather than two separate charts, since they're read
@@ -542,6 +678,60 @@ login covers the whole site.
 **Live dashboard (HTTPS, password-protected):** https://d3nk6zxm1fgda3.cloudfront.net/
 Login: see `aws_backend/cloudfront_basic_auth_function.js` (gitignored) or ask whoever set it.
 
+### 4.9 Alarm thresholds and indication
+
+Storage — `Pico2wAlarmThresholds`, one item per device:
+
+```
+Partition key:  device_id (S)          -- no sort key: one threshold set per device
+Attributes:     temperature_threshold (N)    -- die temp  (temperature_c)
+                ambient_temp_threshold (N)   -- room temp (ambient_temp_c)
+                humidity_threshold (N)
+                updated_ts (S)               -- epoch-ms, when they were last changed
+Billing mode:   PAY_PER_REQUEST
+```
+
+Write path — [aws_backend/set_thresholds_lambda.py](aws_backend/set_thresholds_lambda.py)
+(`pico2w-set-thresholds`): validates a JSON body with numeric `temperature`, `ambient_temp` and
+`humidity`, writes the item, returns what it stored. Same `x-origin-verify` check as the read
+path (§4.8). IAM role `Pico2wSetThresholdsLambdaRole` — `dynamodb:PutItem` on this table only.
+Exposed as `POST /telemetry/thresholds`, which needed no new CloudFront behavior (it matches the
+existing `/telemetry*` pattern) but did require widening that behavior's `AllowedMethods` — see
+§5.4.
+
+Ingest — [aws_backend/store_telemetry_lambda.py](aws_backend/store_telemetry_lambda.py) reads the
+thresholds (falling back to `45.0`/`35.0`/`70.0` in code if the item doesn't exist yet) and stamps
+up to three booleans onto each reading: `temperature_alarm`, `ambient_temp_alarm`,
+`humidity_alarm`. A flag is only written when its source field is present, so a DHT11 dropout
+(§5.2) yields *no* flag for ambient/humidity rather than a false `false` — verified in §5.4.
+
+Read — [aws_backend/get_telemetry_lambda.py](aws_backend/get_telemetry_lambda.py) passes the
+booleans through and adds a top-level `thresholds` object, so one poll returns readings, alarm
+state and the active thresholds together:
+
+```json
+{
+  "device_id": "pico2w-VZ-210726-freertos",
+  "count": 2,
+  "readings": [
+    {"reading_ts": 1791106518901, "temperature_c": 34.16, "temperature_alarm": false,
+     "ambient_temp_c": 24.0, "ambient_temp_alarm": false,
+     "humidity_pct": 61.0, "humidity_alarm": false, "device_id": "..."}
+  ],
+  "thresholds": {"temperature_threshold": 45.0, "ambient_temp_threshold": 35.0,
+                 "humidity_threshold": 70.0, "updated_ts": 1791106560469}
+}
+```
+
+UI — [web_ui/index.html](web_ui/index.html) gained a "Current values" tile row (temperature,
+ambient, humidity, last update) and an "Alarm values" tile row (the three active thresholds plus
+when they last changed), three threshold inputs and a "Set alarm values" button. Each current-value
+tile turns red via `.in-alarm` driven by *its own* server-supplied flag; the thresholds' timestamp
+tile turns red when the newest reading has tripped any threshold (the reference's "any alarm"
+indication); and table cells are highlighted per-reading, so alarm history is visible too. The
+threshold inputs are seeded from the server once and then left alone — otherwise the 10s
+auto-refresh would overwrite whatever is being typed.
+
 ---
 
 ## 5. Verification performed
@@ -609,6 +799,38 @@ directly in DynamoDB, not a rendering bug). Investigation, in order:
 | Existing SQS queue | still accumulating, unaffected |
 | Dashboard opened in a real browser | renders and updates correctly |
 
+### 5.4 Alarm thresholds (Phase 17)
+
+Run against the live device and the live dashboard URL, not a test stub:
+
+| Check | Result |
+|---|---|
+| Thresholds survive in DynamoDB, returned to any fresh client | pass — same values from a new session |
+| Alarm trips when readings exceed thresholds (set 30/20/50 against 34.16/24.0/61.0) | all three flags `true` on the next reading |
+| Alarm clears when thresholds restored (45/35/70) | all three flags `false` |
+| `>=` boundary: threshold set to *exactly* the current reading (35.1 vs 35.1) | `temperature_alarm: true` — matches the reference's `>=` |
+| DHT11 dropout (synthetic publish, `temperature_c` + `dht_err` only, ambient/humidity thresholds at 1.0 so any value would trip) | `temperature_alarm: true`; `ambient_temp_alarm`/`humidity_alarm` **absent**, not false alarms |
+| Invalid body: non-numeric / missing field / malformed JSON / `Infinity` | `400` with a usable error message (see the bug below) |
+| All three Lambdas' CloudWatch Logs after the fix | 0 errors |
+
+Two real bugs were caught by this pass rather than by inspection:
+
+1. **`POST` was rejected by CloudFront with a `403`** before reaching the auth function or the
+   API. The `/telemetry*` behavior had been created in Phase 10 with `AllowedMethods` =
+   `GET,HEAD`, correct at the time since the API was read-only. CloudFront only accepts specific
+   method sets, so enabling `POST` means taking the full seven (`CachedMethods` stays `GET,HEAD`).
+2. **Non-numeric threshold values returned `500`, not `400`.** `Decimal("hot")` raises
+   `decimal.InvalidOperation`, which subclasses `ArithmeticError` — not `ValueError` — so it
+   escaped the handler's `except (ValueError, KeyError, TypeError)` entirely. CloudWatch Logs
+   confirmed the exact cause (`[ERROR] InvalidOperation: [<class 'decimal.ConversionSyntax'>]`).
+   Fixed by catching `InvalidOperation` and additionally rejecting non-finite values, since
+   `Decimal("Infinity")` parses happily and would then fail at DynamoDB write time instead.
+
+Not verified here: the rendered page. This environment has no browser or JS runtime, so the tiles,
+the red `.in-alarm` styling and the Set button were checked at the data/API level and by
+cross-checking every element id the script looks up against the markup — not by rendering or
+clicking.
+
 Useful commands for future debugging:
 
 ```bash
@@ -644,6 +866,18 @@ aws lambda update-function-code --function-name pico2w-store-telemetry \
 zip -q get_telemetry_lambda.zip get_telemetry_lambda.py
 aws lambda update-function-code --function-name pico2w-get-telemetry \
   --zip-file fileb://get_telemetry_lambda.zip --region eu-central-1
+
+zip -q set_thresholds_lambda.zip set_thresholds_lambda.py
+aws lambda update-function-code --function-name pico2w-set-thresholds \
+  --zip-file fileb://set_thresholds_lambda.zip --region eu-central-1
+```
+
+Changing alarm thresholds without the dashboard:
+
+```bash
+curl -s -u "<user>:<pass>" -X POST "https://d3nk6zxm1fgda3.cloudfront.net/telemetry/thresholds" \
+  -H "Content-Type: application/json" \
+  -d '{"temperature":45,"ambient_temp":35,"humidity":70}'
 ```
 
 Updating `web_ui/index.html` (now behind CloudFront, not the old S3 website endpoint):
@@ -703,6 +937,17 @@ USB/debug-probe, which this conversation doesn't have.
 - **DHT11 diagnostic fields (`dht_err`/`dht_fail_count`) are implemented end-to-end but not yet
   flashed to the device** (§5.2) — the backend/UI will display them as soon as the firmware is
   reflashed; until then, a stale reading still just shows a blank cell with no reason.
+- **Alarms are indication-only** — a tripped threshold turns the dashboard red, and nothing else.
+  No notification, no alarm log, no acknowledgement. Since the flags are already persisted per
+  reading, an IoT Rule or DynamoDB Stream → SNS/email would be the natural next step, as would a
+  "currently in alarm" query rather than reading it off the newest row.
+- **Thresholds are per-device but the UI assumes one device** — the schema and both Lambdas key
+  thresholds by `device_id`, so a second board gets its own set automatically; the page just has
+  no device picker (same gap as the readings view).
+- **No range validation on thresholds** — any finite number is accepted, so a humidity threshold
+  of `500` (never reachable) or `-5` (always tripped) is allowed. Deliberate: the plausible range
+  depends on the sensor, and a wrong-but-finite threshold is immediately visible on the dashboard
+  and trivially corrected.
 
 ---
 
@@ -711,11 +956,14 @@ USB/debug-probe, which this conversation doesn't have.
 | Resource | Name / ID |
 |---|---|
 | DynamoDB table | `Pico2wTelemetry` |
+| DynamoDB table (alarm thresholds) | `Pico2wAlarmThresholds` |
 | Write Lambda | `pico2w-store-telemetry` |
 | Write Lambda role | `Pico2wStoreTelemetryLambdaRole` |
 | IoT Rule (new) | `Pico2wStoreTelemetryRule` |
 | Read Lambda | `pico2w-get-telemetry` |
 | Read Lambda role | `Pico2wGetTelemetryLambdaRole` |
+| Set-thresholds Lambda | `pico2w-set-thresholds` |
+| Set-thresholds Lambda role | `Pico2wSetThresholdsLambdaRole` |
 | API Gateway | `Pico2wTelemetryApi` (`o4apfjc495`) |
 | API Gateway direct URL (blocked, §4.8) | `https://o4apfjc495.execute-api.eu-central-1.amazonaws.com/telemetry` |
 | S3 bucket (private, CloudFront-only) | `pico2w-telemetry-ui-596633517506` |
@@ -729,6 +977,7 @@ USB/debug-probe, which this conversation doesn't have.
 |---|---|
 | `aws_backend/store_telemetry_lambda.py` | Write-path Lambda source |
 | `aws_backend/get_telemetry_lambda.py` | Read-path Lambda source (origin-verify check, §4.8) |
+| `aws_backend/set_thresholds_lambda.py` | Alarm-threshold write Lambda source (§4.9) |
 | `aws_backend/iot_store_telemetry_rule.json` | IoT Rule definition (SQL + Lambda action) |
 | `aws_backend/iam/*.json` | IAM trust/permissions policies + S3 bucket policy (CloudFront-only, §4.6) |
 | `aws_backend/cloudfront_distribution_config.json` | Base CloudFront distribution config (Phase 8) |

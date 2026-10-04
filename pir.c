@@ -34,7 +34,7 @@ static void pir_gpio_isr(void)
 
     pir_edge_cb_t cb = dev->on_edge;
     if (cb != NULL) {
-        cb(gpio_get(dev->out_pin), to_ms_since_boot(get_absolute_time()));
+        cb(gpio_get(dev->out_pin), time_us_64() / 1000u);
     }
 }
 

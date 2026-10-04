@@ -132,19 +132,19 @@ you can call normal FreeRTOS APIs, but keep them short and non-blocking:
 ```c
 #include "pir_task.h"
 
-void pir_on_motion_start(uint32_t time_ms)
+void pir_on_motion_start(uint64_t time_ms)
 {
     xEventGroupSetBits(app_events, APP_MOTION_BIT);
 }
 
-void pir_on_motion_stop(uint32_t time_ms, uint32_t duration_ms)
+void pir_on_motion_stop(uint64_t time_ms, uint32_t duration_ms)
 {
     xEventGroupClearBits(app_events, APP_MOTION_BIT);
 }
 ```
 
-`time_ms` is the edge time sampled in the ISR (ms since boot, 32-bit), not the time the
-hook runs. Only one strong override of each hook can exist in the program; in this
+`time_ms` is the edge time sampled in the ISR (ms since boot, 64-bit, never wraps), not the
+time the hook runs. Only one strong override of each hook can exist in the program; in this
 project it is in `lan_mqtt_task.c`, which forwards the events to the Pi's MQTT broker.
 
 To read the state instead, call `pir_get_status(&st)`. It returns

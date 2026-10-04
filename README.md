@@ -21,6 +21,9 @@ Pico SDK 2.3.0, and the FreeRTOS-Kernel `RP2350_ARM_NTZ` SMP port.
   API (API Gateway + Lambda) serves it to a Chart.js line-graph dashboard, fronted by CloudFront
   for HTTPS and a password gate (`aws_backend/`, `web_ui/`) — no firmware changes needed for the
   core pipeline, runs alongside the existing SQS path
+- **Configurable alarm thresholds** — per-reading alarm flags for die temperature, ambient
+  temperature and humidity, computed server-side at ingest against thresholds you set from the
+  dashboard, shown as red values on the live tiles and in the readings table
 - **Sensor telemetry**:
   - RP2350's internal die temperature sensor (`temp_task`)
   - DHT11 humidity + ambient temperature over a PIO-based single-wire driver (`humiture_task`,
@@ -112,11 +115,10 @@ is in [AWS-RasPi_PicoW2.md](AWS-RasPi_PicoW2.md).
 | `pir.c/h` | PIR motion sensor driver: pins, trigger mode, GPIO edge ISR (no FreeRTOS) |
 | `lan_mqtt_task.c/h` | PIR events, state and online status to the Mosquitto broker on the Raspberry Pi 4B (plain MQTT on the LAN); see [PIR-MQTT-VMS-Pico.md](PIR-MQTT-VMS-Pico.md) |
 | `lan_mqtt_config.h`* / `.h.example` | LAN broker address, user and password (`.h` gitignored) |
-| `boot_time.h`, `tests/boot_time_test.c` | 64-bit `boot_ms` from the 32-bit edge timestamps, and its host-side test |
 | `watchdog_task.c/h` | Hardware-watchdog supervisor: resets after 4 min without Wi‑Fi or when a monitored task stops checking in; reports the reason after the reboot |
 | `sensor_task.c/h` | I2C MPU6050 example (independent of the AWS IoT path) |
-| `aws_backend/` | Cloud-side telemetry backend: Lambda sources, IAM/bucket policies, IoT Rule, CloudFront distribution config (see [AWS-Telemetry-WebUI.md](AWS-Telemetry-WebUI.md)) |
-| `web_ui/index.html` | Browser dashboard (table + Chart.js line graph), deployed to S3, served via CloudFront (HTTPS + password gate) |
+| `aws_backend/` | Cloud-side telemetry backend: Lambda sources (store/get telemetry, set alarm thresholds), IAM/bucket policies, IoT Rule, CloudFront distribution config (see [AWS-Telemetry-WebUI.md](AWS-Telemetry-WebUI.md)) |
+| `web_ui/index.html` | Browser dashboard (value tiles, Chart.js line graph, readings table, alarm thresholds), deployed to S3, served via CloudFront (HTTPS + password gate) |
 
 \* gitignored — see [Configuration](#configuration-required-before-first-build) above.
 
@@ -136,9 +138,10 @@ is in [AWS-RasPi_PicoW2.md](AWS-RasPi_PicoW2.md).
   ratings, and the ISR → queue → task design sharing `IO_IRQ_BANK0` with the CYW43 driver.
 - **[AWS-Telemetry-WebUI.md](AWS-Telemetry-WebUI.md)** — the DynamoDB + Lambda + API Gateway +
   CloudFront telemetry dashboard: architecture, design decisions (DynamoDB over RDS,
-  `topic()`-derived `device_id`, CloudFront Function Basic Auth over Cognito), every resource
-  created, a real intermittent-sensor debugging story, verification performed, and redeploy
-  commands (including rotating the dashboard password).
+  `topic()`-derived `device_id`, CloudFront Function Basic Auth over Cognito, alarm flags stamped
+  server-side at ingest), every resource created, a real intermittent-sensor debugging story,
+  verification performed, and redeploy commands (including rotating the dashboard password and
+  changing alarm thresholds from the CLI).
 
 ## Security notes
 
