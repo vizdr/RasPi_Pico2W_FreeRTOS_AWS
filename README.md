@@ -11,6 +11,10 @@ Pico SDK 2.3.0, and the FreeRTOS-Kernel `RP2350_ARM_NTZ` SMP port.
   <img src="AWS-IoT-RPi-Pico.png" width="540">
 </p>
 
+<p align="center">
+  <img src="Charts-Web.png" width="540">
+</p>
+
 ## What's here
 
 - **WiFi station connection** with automatic reconnect (`wifi_task`)
