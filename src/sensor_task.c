@@ -1,69 +1,65 @@
+/**
+ * @file sensor_task.c
+ * @brief FreeRTOS service for the MPU6050 accelerometer (driver: mpu6050.c/h).
+ *
+ * Owns the sensor exclusively, so the driver needs no mutex. Keeps retrying while the
+ * sensor is absent, which is the normal state here: the MPU6050 is an example and is
+ * not currently wired to real hardware.
+ */
+
 #include "sensor_task.h"
+#include "mpu6050.h"
 
 #include "pico/stdlib.h"
-#include "hardware/i2c.h"
 
 #include "FreeRTOS.h"
 #include "task.h"
 
-#define MPU6050_ADDR              0x68
-#define MPU6050_REG_PWR_MGMT_1    0x6B
-#define MPU6050_REG_ACCEL_XOUT_H  0x3B
+#include <stdio.h>
 
-#define SENSOR_POLL_MS 200
+/* ---- configuration ------------------------------------------------------ */
 
-static bool mpu6050_init(void) {
-    i2c_init(i2c_default, 400 * 1000); // 400kHz
-    gpio_set_function(PICO_DEFAULT_I2C_SDA_PIN, GPIO_FUNC_I2C);
-    gpio_set_function(PICO_DEFAULT_I2C_SCL_PIN, GPIO_FUNC_I2C);
-    gpio_pull_up(PICO_DEFAULT_I2C_SDA_PIN);
-    gpio_pull_up(PICO_DEFAULT_I2C_SCL_PIN);
+#ifndef SENSOR_I2C
+#define SENSOR_I2C          i2c_default
+#endif
 
-    // Wake the sensor up (it starts in sleep mode) and confirm it's actually present:
-    // i2c_write_blocking returns PICO_ERROR_GENERIC if the address is never ACKed,
-    // which is the normal outcome here if no MPU6050 is wired to GPIO4/GPIO5 yet.
-    uint8_t buf[2] = {MPU6050_REG_PWR_MGMT_1, 0x00};
-    int ret = i2c_write_blocking(i2c_default, MPU6050_ADDR, buf, 2, false);
-    return ret == 2;
-}
+#ifndef SENSOR_SDA_GPIO
+#define SENSOR_SDA_GPIO     PICO_DEFAULT_I2C_SDA_PIN
+#endif
 
-static bool mpu6050_read_accel(int16_t *ax, int16_t *ay, int16_t *az) {
-    uint8_t reg = MPU6050_REG_ACCEL_XOUT_H;
-    uint8_t data[6];
+#ifndef SENSOR_SCL_GPIO
+#define SENSOR_SCL_GPIO     PICO_DEFAULT_I2C_SCL_PIN
+#endif
 
-    // Register-address write with no stop condition, then a repeated-start read —
-    // the standard pattern for "select register, then read N bytes" on I2C sensors.
-    if (i2c_write_blocking(i2c_default, MPU6050_ADDR, &reg, 1, true) != 1) {
-        return false;
-    }
-    if (i2c_read_blocking(i2c_default, MPU6050_ADDR, data, 6, false) != 6) {
-        return false;
-    }
+#define SENSOR_BAUDRATE     (400 * 1000)
+#define SENSOR_POLL_MS      200u
 
-    *ax = (int16_t)(data[0] << 8 | data[1]);
-    *ay = (int16_t)(data[2] << 8 | data[3]);
-    *az = (int16_t)(data[4] << 8 | data[5]);
-    return true;
-}
+/* ---- task --------------------------------------------------------------- */
 
-void sensor_task(__unused void *params) {
-    bool sensor_present = mpu6050_init();
-    if (!sensor_present) {
-        printf("sensor_task: no MPU6050 ACK on I2C0 (SDA=GPIO%d, SCL=GPIO%d) - "
-               "check wiring, will keep retrying\n",
-               PICO_DEFAULT_I2C_SDA_PIN, PICO_DEFAULT_I2C_SCL_PIN);
+static mpu6050_t s_dev;
+
+void sensor_task(__unused void *params)
+{
+    mpu6050_init(&s_dev, SENSOR_I2C, SENSOR_SDA_GPIO, SENSOR_SCL_GPIO,
+                 SENSOR_BAUDRATE, MPU6050_ADDR_DEFAULT);
+
+    bool present = (mpu6050_wake(&s_dev) == MPU6050_OK);
+    if (!present) {
+        printf("sensor_task: no MPU6050 ACK on I2C (SDA=GPIO%d, SCL=GPIO%d) - "
+               "check wiring, will keep retrying\n", SENSOR_SDA_GPIO, SENSOR_SCL_GPIO);
     }
 
     for (;;) {
-        if (!sensor_present) {
-            sensor_present = mpu6050_init();
+        if (!present) {
+            present = (mpu6050_wake(&s_dev) == MPU6050_OK);
         } else {
-            int16_t ax, ay, az;
-            if (mpu6050_read_accel(&ax, &ay, &az)) {
-                printf("accel: x=%d y=%d z=%d\n", ax, ay, az);
+            mpu6050_accel_t accel;
+            mpu6050_status_t st = mpu6050_read_accel(&s_dev, &accel);
+            if (st == MPU6050_OK) {
+                printf("accel: x=%d y=%d z=%d\n", accel.x, accel.y, accel.z);
             } else {
-                printf("sensor_task: I2C read failed, will retry\n");
-                sensor_present = false;
+                printf("sensor_task: read failed: %s, will retry\n", mpu6050_status_str(st));
+                present = false;
             }
         }
         vTaskDelay(pdMS_TO_TICKS(SENSOR_POLL_MS));

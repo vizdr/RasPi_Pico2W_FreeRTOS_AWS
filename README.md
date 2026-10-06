@@ -172,7 +172,7 @@ the include path — so sources use plain `#include "wifi_task.h"` with no direc
 | `temp_task.c/h` | Internal RP2350 temperature sensor; feeds telemetry |
 | `humiture_task.c/h` | FreeRTOS task wrapping the DHT11 driver; feeds telemetry |
 | `pir_task.c/h` | FreeRTOS task wrapping the PIR driver: motion start/stop hooks, `pir_get_status()` |
-| `sensor_task.c/h` | I2C MPU6050 example (independent of the AWS IoT path) |
+| `sensor_task.c/h` | FreeRTOS task wrapping the MPU6050 driver: poll period, retry-while-absent policy (independent of the AWS IoT path) |
 | `led.c/h` | LED as WiFi connection indicator |
 
 ### `drivers/` — hardware
@@ -181,6 +181,7 @@ the include path — so sources use plain `#include "wifi_task.h"` with no direc
 |---|---|
 | `dht.c/h`, `dht.pio` | PIO-based DHT11/DHT22 single-wire driver |
 | `pir.c/h` | PIR motion sensor driver: pins, trigger mode, GPIO edge ISR (no FreeRTOS) |
+| `mpu6050.c/h` | MPU6050 accelerometer driver over I2C: bus/pin setup, wake, raw accel read |
 
 ### `config/` — tunables and credentials
 
@@ -225,6 +226,10 @@ the include path — so sources use plain `#include "wifi_task.h"` with no direc
   Pico 2 W to the Pi 4B with minimal delay: transport options considered and the broker setup.
 - **[PIR-MQTT-VMS-OLD.md](docs/PIR-MQTT-VMS-OLD.md)** — superseded by the two above; kept for
   reference only, don't implement from it.
+- **[M33_Registers.md](docs/M33_Registers.md)** — what the Cortex-M33 registers mean on the
+  RP2350, worked through on a real snapshot taken while halted in `pir_task`: the FreeRTOS
+  register-preload pattern, why `lr` is not your caller, and how to resolve addresses against the
+  ELF.
 - **[AWS-Telemetry-WebUI.md](docs/AWS-Telemetry-WebUI.md)** — the DynamoDB + Lambda + API Gateway +
   CloudFront telemetry dashboard: architecture, design decisions (DynamoDB over RDS,
   `topic()`-derived `device_id`, CloudFront Function Basic Auth over Cognito, alarm flags stamped

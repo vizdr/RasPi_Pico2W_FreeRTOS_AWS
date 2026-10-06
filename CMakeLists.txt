@@ -57,6 +57,7 @@ add_executable(blink_freertos
     src/watchdog_task.c
     drivers/dht.c
     drivers/pir.c
+    drivers/mpu6050.c
     config/aws_credentials.c
     )
 
